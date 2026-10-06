@@ -3,6 +3,14 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&':'&am
 const brl = value => new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'}).format(value);
 const state = { gifts:[], memories:[], guests:[], admin:null, category:'Todos', search:'', adminTab:'visao-geral', adminSearch:'' };
 const categories=['Todos','Lua de Mel','Novo Lar','Experiências','Família & Pets'];
+const revealTargets='.section > .eyebrow,.section > h2,.section-head,.manuscript,.venue,.gift-card,.memory-card,.rsvp-box,.mirror,.guest-card,body > footer > *';
+const revealObserver='IntersectionObserver'in window?new IntersectionObserver(entries=>{for(const entry of entries)entry.target.classList.toggle('is-visible',entry.isIntersecting)},{threshold:0.12,rootMargin:'0px 0px -6% 0px'}):null;
+if(revealObserver&&!matchMedia('(prefers-reduced-motion: reduce)').matches){
+  document.documentElement.classList.add('motion-ready');
+  const observeReveals=root=>{if(root.matches?.(revealTargets)){root.dataset.reveal='';revealObserver.observe(root)}root.querySelectorAll?.(revealTargets).forEach(element=>{element.dataset.reveal='';revealObserver.observe(element)})};
+  observeReveals(document);
+  new MutationObserver(records=>records.forEach(record=>record.addedNodes.forEach(node=>{if(node.nodeType===Node.ELEMENT_NODE)observeReveals(node)}))).observe(document.querySelector('main'),{childList:true,subtree:true});
+}
 async function api(path, options={}) {
   const response=await fetch(path,{...options,headers:{...(options.body?{'content-type':'application/json'}:{}),...options.headers},credentials:'same-origin'});
   const payload=response.status===204?{}:await response.json().catch(()=>({}));
