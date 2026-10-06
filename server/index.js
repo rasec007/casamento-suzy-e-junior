@@ -28,6 +28,12 @@ await app.register(rateLimit, { global: true, max: 180, timeWindow: '1 minute' }
 await app.register(multipart, { limits: { fileSize: 5 * 1024 * 1024, files: 1, fields: 8, parts: 10 } });
 await app.register(fastifyStatic, { root: join(root, '../public'), prefix: '/', maxAge: process.env.NODE_ENV === 'production' ? '1h' : 0, immutable: false, wildcard: false });
 
+app.addHook('onRequest', async (request, reply) => {
+  if (request.url.split('?')[0] !== '/' || !['GET', 'HEAD'].includes(request.method)) return;
+  const slug = /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(defaultWeddingSlug) ? defaultWeddingSlug : 'slug-do-casamento';
+  reply.code(404).type('text/html; charset=utf-8').send(`<!doctype html><html lang="pt-BR"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Endereço incompleto | Casamento</title><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;background:#0a0d14;color:#ebebeb;font:16px/1.7 system-ui,sans-serif;text-align:center}.card{max-width:620px;padding:clamp(28px,7vw,56px);border:1px solid #c0a06270;background:#101520}h1{color:#c0a062;font:400 clamp(28px,6vw,42px)/1.2 Georgia,serif}p{color:#ccc}a{display:inline-block;margin-top:14px;padding:12px 18px;border:1px solid #c0a062;color:#c0a062;text-decoration:none}code{color:#ebebeb}</style><main class="card"><p>ENDEREÇO INCOMPLETO</p><h1>Esta URL está incorreta</h1><p>Falta o slug que identifica o casamento. O endereço do site deve incluir <code>/casamento/slug-do-casamento</code>.</p><p>Para Suzy &amp; Junior, acesse o endereço correto:</p><a href="/casamento/${slug}">Abrir o site de Suzy &amp; Junior</a></main></html>`);
+});
+
 async function requireAdmin(request, reply) {
   reply.header('cache-control', 'no-store');
   const session = request.unsignCookie(request.cookies.admin_session || '');
@@ -63,7 +69,8 @@ function sameOrigin(request, reply, done) {
 app.addHook('preHandler', sameOrigin);
 app.addHook('preHandler', async (request, reply) => {
   if (!request.url.startsWith('/api/') || request.url.startsWith('/api/health') || request.url.startsWith('/api/admin/register') || request.url.startsWith('/api/events')) return;
-  const requestedSlug = request.headers['x-wedding-slug'] || new URL(request.url, 'http://local').searchParams.get('wedding') || defaultWeddingSlug;
+  const requestedSlug = request.headers['x-wedding-slug'] || new URL(request.url, 'http://local').searchParams.get('wedding');
+  if (!requestedSlug) return reply.code(400).send({error:'URL incompleta: informe o slug do casamento, por exemplo /casamento/suzy-e-junior.'});
   if (typeof requestedSlug !== 'string' || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(requestedSlug)) return reply.code(400).send({error:'Slug de casamento inválido.'});
   const found = await pool.query('SELECT id,title FROM weddings WHERE slug=$1', [requestedSlug]);
   if (!found.rowCount) return reply.code(404).send({error:'Casamento não encontrado.'});
@@ -354,7 +361,9 @@ app.post('/api/admin/suppliers', { preHandler: requireAdmin }, async (req,reply)
   return reply.code(201).send({id:result.rows[0].id});
 });
 app.get('/api/events', async (req, reply) => {
-  const slug=req.query?.wedding||defaultWeddingSlug, result=await pool.query('SELECT id FROM weddings WHERE slug=$1',[slug]);
+  const slug=req.query?.wedding;
+  if(!slug)return reply.code(400).send({error:'URL incompleta: informe o slug do casamento.'});
+  const result=await pool.query('SELECT id FROM weddings WHERE slug=$1',[slug]);
   if(!result.rowCount)return reply.code(404).send({error:'Casamento não encontrado.'});
   const weddingId=result.rows[0].id;
   reply.hijack();
