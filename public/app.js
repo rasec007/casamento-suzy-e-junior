@@ -1,7 +1,7 @@
 const $ = (selector, root = document) => root.querySelector(selector);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[char]);
 const brl = value => new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'}).format(value);
-const state = { gifts:[], memories:[], guests:[], admin:null, category:'Todos', search:'', adminTab:'visao-geral', adminSearch:'' };
+const state = { gifts:[], memories:[], guests:[], venues:[], admin:null, category:'Todos', search:'', adminTab:'visao-geral', adminSearch:'' };
 const categories=['Todos','Lua de Mel','Novo Lar','Experiências','Família & Pets'];
 const revealTargets='.section > .eyebrow,.section > h2,.section-head,.manuscript,.venue,.gift-card,.memory-card,.rsvp-box,.mirror,.guest-card,body > footer > *';
 const revealObserver='IntersectionObserver'in window?new IntersectionObserver(entries=>{for(const entry of entries)entry.target.classList.toggle('is-visible',entry.isIntersecting)},{threshold:0.12,rootMargin:'0px 0px -6% 0px'}):null;
@@ -12,12 +12,16 @@ if(revealObserver&&!matchMedia('(prefers-reduced-motion: reduce)').matches){
   new MutationObserver(records=>records.forEach(record=>record.addedNodes.forEach(node=>{if(node.nodeType===Node.ELEMENT_NODE)observeReveals(node)}))).observe(document.querySelector('main'),{childList:true,subtree:true});
 }
 async function api(path, options={}) {
-  const response=await fetch(path,{...options,headers:{...(options.body?{'content-type':'application/json'}:{}),...options.headers},credentials:'same-origin'});
+  const isFormData=options.body instanceof FormData;
+  const response=await fetch(path,{...options,headers:{...(options.body&&!isFormData?{'content-type':'application/json'}:{}),...options.headers},credentials:'same-origin'});
   const payload=response.status===204?{}:await response.json().catch(()=>({}));
   if(!response.ok) throw new Error(payload.error||'Não foi possível concluir a solicitação.');
   return payload;
 }
 function notify(message){const toast=$('#toast');toast.textContent=message;toast.classList.add('show');clearTimeout(notify.timer);notify.timer=setTimeout(()=>toast.classList.remove('show'),3200)}
+function renderVenues(){
+  $('#venues').innerHTML=state.venues.map(venue=>`<article class="venue"><p class="eyebrow">${esc(venue.eyebrow)}</p><h3>${esc(venue.title)}</h3><p class="venue-name">${esc(venue.name)}</p><p>${esc(venue.address)}</p><div class="venue-photo"><img loading="lazy" src="${esc(venue.imageUrl)}" alt="${esc(venue.imageAlt)}"></div><a class="outline block" target="_blank" rel="noopener noreferrer" href="${esc(venue.mapsUrl)}">Abrir rota no Google Maps ↗</a></article>`).join('');
+}
 function renderGifts(){
   $('#categories').innerHTML=categories.map(category=>`<button type="button" data-category="${esc(category)}" class="${category===state.category?'active':''}">${esc(category)}</button>`).join('');
   const gifts=state.category==='Todos'?state.gifts:state.gifts.filter(gift=>gift.category===state.category);
@@ -32,14 +36,14 @@ function renderGuests(){
   const filtered=visible.filter(guest=>guest.name.toLocaleLowerCase('pt-BR').includes(q));
   $('#guests').innerHTML=filtered.map(guest=>`<article class="guest-card"><b>${esc(guest.name)}</b><span>${guest.companions?`+${guest.companions} acompanhante(s)`:'Presença individual'} · ${esc(guest.confirmedAt)}</span></article>`).join('')||'<p class="muted">Nenhum nome encontrado.</p>';
 }
-async function loadSite(){const data=await api('/api/site');state.gifts=data.gifts;state.memories=data.memories;state.guests=data.guests;renderGifts();renderMemories();renderGuests()}
+async function loadSite(){const data=await api('/api/site');state.gifts=data.gifts;state.memories=data.memories;state.guests=data.guests;state.venues=data.venues||[];renderVenues();renderGifts();renderMemories();renderGuests()}
 function openGift(gift){
   const dialog=$('#gift-dialog');
   dialog.innerHTML=`<div class="dialog-inner"><div class="dialog-head"><div><p class="eyebrow">${esc(gift.category)}</p><h2 id="gift-dialog-title">${esc(gift.title)}</h2><b class="price-value">${brl(gift.price)}</b></div><button class="icon-button" data-close aria-label="Fechar">×</button></div><p class="muted">Deixe seu carinho na Penseira. Esta versão registra a intenção do presente; o pagamento será combinado diretamente com os noivos.</p><form id="memory-form" class="dialog-form"><label>Seu nome / família *<input name="senderName" maxlength="120" required autocomplete="name"></label><label>WhatsApp com DDD *<input name="whatsapp" maxlength="24" inputmode="tel" required autocomplete="tel"></label><label>Mensagem aos noivos<textarea name="message" maxlength="1000" placeholder="Um recado carinhoso"></textarea></label><button class="gold-button">Registrar presente e mensagem</button><p class="form-status" role="status"></p></form></div>`;
   dialog.showModal();
   $('#memory-form').addEventListener('submit',async event=>{event.preventDefault();const form=event.currentTarget;const button=$('button[type="submit"]',form);button.disabled=true;try{await api('/api/memories',{method:'POST',body:JSON.stringify({...Object.fromEntries(new FormData(form)),giftId:gift.id})});form.reset();dialog.close();notify('Sua mensagem foi adicionada à Penseira.');await loadSite()}catch(error){$('.form-status',form).textContent=error.message}finally{button.disabled=false}});
 }
-const tabs=[['visao-geral','Visão geral'],['presentes','Penseira'],['convidados','Convidados'],['fornecedores','Fornecedores']];
+const tabs=[['visao-geral','Visão geral'],['locais','Locais'],['presentes','Penseira'],['convidados','Convidados'],['fornecedores','Fornecedores']];
 function recordRows(){
   const lists={
     presentes:state.admin.memories.map(r=>({kind:'memories',id:r.id,title:r.senderName,detail:`${r.giftTitle} · ${brl(r.giftAmount)}`,visible:r.isVisible,edit:[['senderName','Nome',r.senderName],['message','Mensagem',r.message]]})),
@@ -50,6 +54,11 @@ function recordRows(){
 }
 function renderAdmin(){
   if(!state.admin)return;
+  if(state.adminTab==='locais'){
+    const content=state.admin.venues.map(venue=>`<form class="admin-venue" data-venue-form="${esc(venue.id)}"><p class="eyebrow">${esc(venue.id==='ceremony'?'CERIMÔNIA':'RECEPÇÃO')}</p><h3>${esc(venue.title)}</h3><label>Texto de apoio<input name="eyebrow" maxlength="100" value="${esc(venue.eyebrow)}" required></label><label>Título<input name="title" maxlength="100" value="${esc(venue.title)}" required></label><label>Nome do local<input name="name" maxlength="160" value="${esc(venue.name)}" required></label><label>Endereço completo<textarea name="address" maxlength="240" required>${esc(venue.address)}</textarea></label><label>Link HTTPS do Google Maps<input name="mapsUrl" type="url" maxlength="500" value="${esc(venue.mapsUrl)}" required></label><label>Descrição da foto<input name="imageAlt" maxlength="180" value="${esc(venue.imageAlt)}" required></label><button class="gold-button">Salvar dados do local</button><p class="form-status" role="status"></p><div class="admin-image-preview"><img src="${esc(venue.imageUrl)}" alt="${esc(venue.imageAlt)}"></div><label>Trocar foto (JPG, PNG ou WebP; até 5 MB)<input type="file" accept="image/jpeg,image/png,image/webp" data-venue-image="${esc(venue.id)}"></label><small>As imagens enviadas ficam no bucket privado do MinIO e são entregues pelo site.</small></form>`).join('');
+    $('#admin-content').innerHTML=`<div class="admin"><header class="admin-header"><h2 id="admin-dialog-title">Painel dos Noivos</h2><div class="admin-actions"><button class="outline" id="admin-logout">Sair</button><button class="icon-button" data-close aria-label="Fechar painel">×</button></div></header><nav class="admin-nav">${tabs.map(([id,label])=>`<button data-tab="${id}" class="${id===state.adminTab?'active':''}">${label}</button>`).join('')}</nav><p class="muted">Edite os endereços, links de rota e fotos exibidos no site. As alterações são salvas no banco e refletidas em tempo real.</p><div class="admin-venue-grid">${content}</div><p class="form-status" id="admin-status" role="status"></p></div>`;
+    $('#admin-dialog').classList.add('admin');return;
+  }
   const data=state.admin, allRows=recordRows(), q=state.adminSearch.toLocaleLowerCase('pt-BR'), rows=allRows.filter(r=>`${r.title} ${r.detail}`.toLocaleLowerCase('pt-BR').includes(q));
   const giftsTotal=data.memories.reduce((n,m)=>n+m.giftAmount,0), supplierCost=data.suppliers.reduce((n,s)=>n+s.cost,0), paid=data.suppliers.reduce((n,s)=>n+s.paidAmount,0);
   $('#admin-content').innerHTML=`<div class="admin"><header class="admin-header"><h2 id="admin-dialog-title">Painel dos Noivos</h2><div class="admin-actions"><button class="outline" id="new-supplier">+ Fornecedor</button><button class="outline" id="admin-logout">Sair</button><button class="icon-button" data-close aria-label="Fechar painel">×</button></div></header><nav class="admin-nav">${tabs.map(([id,label])=>`<button data-tab="${id}" class="${id===state.adminTab?'active':''}">${label}</button>`).join('')}</nav><div class="stats"><div class="stat"><span>Intenção de presentes (sem pagamento)</span><b>${brl(giftsTotal)}</b></div><div class="stat"><span>Custo de fornecedores</span><b>${brl(supplierCost)}</b></div><div class="stat"><span>Pago aos fornecedores</span><b>${brl(paid)}</b></div></div><label class="search-label">Buscar<input id="admin-search" type="search" value="${esc(state.adminSearch)}" placeholder="Nome, presente ou fornecedor"></label><div class="table-wrap"><table><thead><tr><th>Registro</th><th>Detalhes</th><th>Visibilidade</th><th>Ações</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${esc(r.title)}</td><td>${esc(r.detail)}</td><td>${r.visible?'Visível':'Oculto'}</td><td><button class="outline" data-toggle="${r.kind}" data-id="${esc(r.id)}" data-visible="${r.visible}">${r.visible?'Ocultar':'Exibir'}</button> <button class="outline" data-edit="${r.kind}" data-id="${esc(r.id)}">Editar</button> <button class="outline" data-delete="${r.kind}" data-id="${esc(r.id)}">Excluir</button></td></tr>`).join('')||'<tr><td colspan="4">Nenhum registro.</td></tr>'}</tbody></table></div><p class="form-status" id="admin-status" role="status"></p></div>`;
@@ -83,6 +92,14 @@ $('#admin-content').addEventListener('click',async event=>{
     if(target.dataset.edit){const row=recordRows().find(item=>item.kind===kind&&item.id===id);if(!row)return;const values={};for(const [field,label,value] of row.edit){const next=prompt(label,value??'');if(next===null)return;values[field]=['companions','cost','paidAmount'].includes(field)?Number(next):next}await api(`/api/admin/${kind}/${id}`,{method:'PATCH',body:JSON.stringify(values)})}
     await loadAdmin();await loadSite();
   }catch(error){$('#admin-status').textContent=error.message}
+});
+$('#admin-content').addEventListener('submit',async event=>{
+  const form=event.target.closest('[data-venue-form]');if(!form)return;event.preventDefault();const status=$('.form-status',form),data=Object.fromEntries(new FormData(form));
+  try{await api(`/api/admin/venues/${form.dataset.venueForm}`,{method:'PATCH',body:JSON.stringify(data)});await loadSite();await loadAdmin();state.adminTab='locais';renderAdmin();notify('Dados do local atualizados.')}catch(error){status.textContent=error.message}
+});
+$('#admin-content').addEventListener('change',async event=>{
+  const input=event.target.closest('[data-venue-image]');if(!input?.files?.length)return;const form=input.closest('[data-venue-form]'),status=$('.form-status',form),data=new FormData();data.append('image',input.files[0]);input.disabled=true;status.textContent='Enviando imagem para o MinIO…';
+  try{await api(`/api/admin/venues/${input.dataset.venueImage}/image`,{method:'POST',body:data});await loadSite();await loadAdmin();state.adminTab='locais';renderAdmin();notify('Foto atualizada no MinIO.')}catch(error){status.textContent=error.message;input.value=''}finally{input.disabled=false}
 });
 $('#admin-content').addEventListener('input',event=>{if(event.target.id==='admin-search'){state.adminSearch=event.target.value;const cursor=event.target.selectionStart;renderAdmin();$('#admin-search').focus();$('#admin-search').setSelectionRange(cursor,cursor)}});
 $('#menu-toggle').addEventListener('click',()=>{const nav=$('#nav'),open=nav.classList.toggle('open');$('#menu-toggle').setAttribute('aria-expanded',String(open))});

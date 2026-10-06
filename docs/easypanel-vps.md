@@ -44,6 +44,10 @@ ADMIN_PASSWORD=SENHA_FORTE_DO_PAINEL
 SESSION_SECRET=SEGREDO_ALEATORIO_COM_PELO_MENOS_32_CARACTERES
 EVOLUTION_API_URL=https://evolutionapi.c2net.com.br/message/sendText/cpu
 EVOLUTION_API_KEY=CHAVE_DA_EVOLUTION_API
+MINIO_SERVER_URL=https://SEU_ENDPOINT_S3
+MINIO_ROOT_USER=USUARIO_MINIO
+MINIO_ROOT_PASSWORD=SENHA_MINIO
+MINIO_BUCKET=suzy-junior-wedding
 ```
 
 Use no `DATABASE_URL` a senha gerada para `suzy_junior_app` e o hostname/porta atuais do banco externo. Se a senha tiver caracteres reservados em URL (`@`, `:`, `/`, `?`, `#`, `%`), faça percent-encoding antes de montá-la. A senha gerada para a role neste ambiente contém somente hexadecimal e pode ser usada diretamente.

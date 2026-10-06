@@ -4,13 +4,15 @@ import cookie from '@fastify/cookie';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import fastifyStatic from '@fastify/static';
+import multipart from '@fastify/multipart';
 import pg from 'pg';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual, randomUUID } from 'node:crypto';
 import { INITIAL_GIFTS, INITIAL_MEMORIES, INITIAL_GUESTS, INITIAL_SUPPLIERS } from './seed-data.js';
 import { sendRsvpConfirmation } from './evolution.js';
+import { isStorageConfigured, ensureBucket, putImage, getImage, deleteImage, closeStorage } from './storage.js';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const app = Fastify({ logger: { redact: ['req.headers.cookie', 'req.headers.authorization'] }, trustProxy: process.env.TRUST_PROXY === 'true', bodyLimit: 16_384, requestTimeout: 15_000 });
@@ -20,6 +22,7 @@ const live = new pg.Client({ connectionString: process.env.DATABASE_URL, applica
 await app.register(cookie, { secret: process.env.SESSION_SECRET || 'development-only-secret-change-this-now' });
 await app.register(helmet, { global: true, contentSecurityPolicy: { directives: { defaultSrc: ["'self'"], styleSrc: ["'self'", 'https://fonts.googleapis.com'], fontSrc: ["'self'", 'https://fonts.gstatic.com'], imgSrc: ["'self'", 'data:'], scriptSrc: ["'self'"], connectSrc: ["'self'"], objectSrc: ["'none'"], upgradeInsecureRequests: null } } });
 await app.register(rateLimit, { global: true, max: 180, timeWindow: '1 minute' });
+await app.register(multipart, { limits: { fileSize: 5 * 1024 * 1024, files: 1, fields: 3, parts: 4 } });
 await app.register(fastifyStatic, { root: join(root, '../public'), prefix: '/', maxAge: process.env.NODE_ENV === 'production' ? '1h' : 0, immutable: false, wildcard: false });
 
 async function requireAdmin(request, reply) {
@@ -71,12 +74,22 @@ app.get('/api/health', async (_req, reply) => {
   catch { return reply.code(503).send({ status: 'unavailable' }); }
 });
 app.get('/api/site', async () => {
-  const [gifts, memories, guests] = await Promise.all([
+  const [gifts, memories, guests, venues] = await Promise.all([
     pool.query('SELECT * FROM gifts ORDER BY id'),
     pool.query(`SELECT ${publicMemoryFields} FROM memories WHERE is_visible ORDER BY created_at DESC LIMIT 100`),
-    pool.query(`SELECT ${publicGuestFields} FROM guests WHERE is_visible ORDER BY created_at DESC LIMIT 250`)
+    pool.query(`SELECT ${publicGuestFields} FROM guests WHERE is_visible ORDER BY created_at DESC LIMIT 250`),
+    pool.query("SELECT value FROM site_settings WHERE key IN ('venue_ceremony','venue_reception') ORDER BY key")
   ]);
-  return { gifts: gifts.rows.map(giftOut), memories: memories.rows.map(memoryOut), guests: guests.rows.map(guestOut) };
+  return { gifts: gifts.rows.map(giftOut), memories: memories.rows.map(memoryOut), guests: guests.rows.map(guestOut), venues: venues.rows.map(r=>r.value) };
+});
+app.get('/media/*', async (req, reply) => {
+  const key=req.params['*'];
+  if(!/^venues\/(ceremony|reception)\/[a-f0-9-]{36}\.(jpg|png|webp)$/.test(key)) return reply.code(404).send({error:'Imagem não encontrada.'});
+  try {
+    const image=await getImage(key);
+    reply.header('content-type',image.ContentType||'application/octet-stream').header('cache-control',image.CacheControl||'public, max-age=31536000, immutable').header('x-content-type-options','nosniff');
+    return reply.send(image.Body);
+  } catch(error) { if(error.name==='NoSuchKey'||error.$metadata?.httpStatusCode===404)return reply.code(404).send({error:'Imagem não encontrada.'});throw error; }
 });
 app.post('/api/rsvp', { config: { rateLimit: { max: 5, timeWindow: '15 minutes' } } }, async (req, reply) => {
   const { name, whatsapp, companions = 0 } = req.body || {};
@@ -106,8 +119,40 @@ app.post('/api/admin/login', { config: { rateLimit: { max: 5, timeWindow: '15 mi
 });
 app.post('/api/admin/logout', { preHandler: requireAdmin }, async (_req, reply) => { reply.clearCookie('admin_session', { path: '/' }); return { ok: true }; });
 app.get('/api/admin/data', { preHandler: requireAdmin }, async () => {
-  const [memories, guests, suppliers] = await Promise.all([pool.query('SELECT * FROM memories ORDER BY created_at DESC'), pool.query('SELECT * FROM guests ORDER BY created_at DESC'), pool.query('SELECT * FROM suppliers ORDER BY name')]);
-  return { memories: memories.rows.map(r => ({ ...memoryOut(r), whatsapp:r.whatsapp, isVisible:r.is_visible })), guests: guests.rows.map(r => ({ ...guestOut(r), whatsapp:r.whatsapp, isVisible:r.is_visible })), suppliers: suppliers.rows.map(r => ({ id:r.id,name:r.name,role:r.role,contact:r.contact,cost:Number(r.cost),paidAmount:Number(r.paid_amount),status:r.status,isVisible:r.is_visible })) };
+  const [memories, guests, suppliers, venues] = await Promise.all([pool.query('SELECT * FROM memories ORDER BY created_at DESC'), pool.query('SELECT * FROM guests ORDER BY created_at DESC'), pool.query('SELECT * FROM suppliers ORDER BY name'),pool.query("SELECT value FROM site_settings WHERE key IN ('venue_ceremony','venue_reception') ORDER BY key")]);
+  return { memories: memories.rows.map(r => ({ ...memoryOut(r), whatsapp:r.whatsapp, isVisible:r.is_visible })), guests: guests.rows.map(r => ({ ...guestOut(r), whatsapp:r.whatsapp, isVisible:r.is_visible })), suppliers: suppliers.rows.map(r => ({ id:r.id,name:r.name,role:r.role,contact:r.contact,cost:Number(r.cost),paidAmount:Number(r.paid_amount),status:r.status,isVisible:r.is_visible })), venues: venues.rows.map(r=>r.value) };
+});
+app.patch('/api/admin/venues/:venueId', { preHandler: requireAdmin }, async (req,reply)=>{
+  const id=req.params.venueId, b=req.body||{};
+  if(!['ceremony','reception'].includes(id)) return reply.code(404).send({error:'Local não encontrado.'});
+  const spec={title:['title',v=>text(v,100)],eyebrow:['eyebrow',v=>text(v,100)],name:['name',v=>text(v,160)],address:['address',v=>text(v,240)],mapsUrl:['maps_url',v=>{if(typeof v!=='string'||v.length>500)return false;try{const u=new URL(v);return u.protocol==='https:'&&(['google.com','www.google.com','maps.google.com','maps.app.goo.gl'].includes(u.hostname))}catch{return false}}],imageAlt:['image_alt',v=>text(v,180)]};
+  const entries=Object.entries(b).filter(([k])=>spec[k]);
+  if(!entries.length||entries.some(([k,v])=>!spec[k][1](v))) return reply.code(400).send({error:'Confira título, nome, endereço e link HTTPS do Google Maps.'});
+  const current=await pool.query('SELECT value FROM site_settings WHERE key=$1',[`venue_${id}`]);
+  if(!current.rowCount)return reply.code(404).send({error:'Local não encontrado.'});
+  const venue={...current.rows[0].value};for(const [key,value] of entries)venue[key]=value.trim();
+  await pool.query('UPDATE site_settings SET value=$2::jsonb,updated_at=now() WHERE key=$1',[`venue_${id}`,JSON.stringify(venue)]);
+  return {ok:true,venue};
+});
+app.post('/api/admin/venues/:venueId/image', { preHandler: requireAdmin, bodyLimit: 5 * 1024 * 1024 + 64 * 1024 }, async (req,reply)=>{
+  const id=req.params.venueId;
+  if(!['ceremony','reception'].includes(id))return reply.code(404).send({error:'Local não encontrado.'});
+  if(!isStorageConfigured())return reply.code(503).send({error:'Armazenamento de imagens não configurado.'});
+  const part=await req.file();if(!part)return reply.code(400).send({error:'Selecione uma imagem JPG, PNG ou WebP.'});
+  const buffer=await part.toBuffer();let ext,type;
+  if(buffer.length>=3&&buffer[0]===0xff&&buffer[1]===0xd8&&buffer[2]===0xff){ext='jpg';type='image/jpeg'}
+  else if(buffer.length>=8&&buffer.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))){ext='png';type='image/png'}
+  else if(buffer.length>=12&&buffer.toString('ascii',0,4)==='RIFF'&&buffer.toString('ascii',8,12)==='WEBP'){ext='webp';type='image/webp'}
+  else return reply.code(400).send({error:'O arquivo não parece ser uma imagem JPG, PNG ou WebP válida.'});
+  const current=await pool.query('SELECT value FROM site_settings WHERE key=$1',[`venue_${id}`]);
+  if(!current.rowCount)return reply.code(404).send({error:'Local não encontrado.'});
+  const key=`venues/${id}/${randomUUID()}.${ext}`;
+  await putImage(key,buffer,type);
+  const previous=current.rows[0].value.imageKey;
+  try{await pool.query("UPDATE site_settings SET value=value||jsonb_build_object('imageKey',$2::text,'imageUrl',$3::text),updated_at=now() WHERE key=$1",[`venue_${id}`,key,`/media/${key}`])}
+  catch(error){await deleteImage(key).catch(()=>{});throw error}
+  if(previous&&/^venues\/(ceremony|reception)\/[a-f0-9-]{36}\.(jpg|png|webp)$/.test(previous))await deleteImage(previous).catch(error=>req.log.warn({err:error},'Imagem anterior permaneceu no armazenamento.'));
+  return {ok:true,imageUrl:`/media/${key}`};
 });
 app.patch('/api/admin/:kind/:id', { preHandler: requireAdmin }, async (req, reply) => {
   const { kind, id } = req.params, b = req.body || {};
@@ -148,8 +193,8 @@ app.setErrorHandler((error,req,reply)=>{ req.log.error(error); const code=error.
 async function start() {
   if (!process.env.DATABASE_URL || !process.env.ADMIN_PASSWORD || process.env.ADMIN_PASSWORD.length < 14 || !process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 32) throw new Error('Configure DATABASE_URL, ADMIN_PASSWORD (mínimo de 14 caracteres) e SESSION_SECRET (mínimo de 32 caracteres).');
   if (process.env.APP_URL) { const appUrl = new URL(process.env.APP_URL); if (!['http:', 'https:'].includes(appUrl.protocol)) throw new Error('APP_URL deve usar http ou https.'); }
-  await seed(); await live.connect(); await live.query('LISTEN wedding_changes');
+  await seed(); if(isStorageConfigured())await ensureBucket(); await live.connect(); await live.query('LISTEN wedding_changes');
   await app.listen({host:process.env.HOST||'127.0.0.1',port:Number(process.env.PORT)||3000});
 }
-for (const signal of ['SIGINT','SIGTERM']) process.on(signal,async()=>{await app.close();await live.end().catch(()=>{});await pool.end();process.exit(0);});
-start().catch(async error=>{app.log.error(error);await app.close();await live.end().catch(()=>{});await pool.end();process.exit(1);});
+for (const signal of ['SIGINT','SIGTERM']) process.on(signal,async()=>{await app.close();await live.end().catch(()=>{});await pool.end();await closeStorage();process.exit(0);});
+start().catch(async error=>{app.log.error(error);await app.close();await live.end().catch(()=>{});await pool.end();await closeStorage();process.exit(1);});
