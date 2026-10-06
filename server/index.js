@@ -72,7 +72,10 @@ app.addHook('preHandler', async (request, reply) => {
   catch(error) { request.db.release(); request.db=null; throw error; }
 });
 app.addHook('onError', async request => { if(request.db&&!request.dbReleased){await request.db.query('ROLLBACK').catch(()=>{});request.db.release();request.dbReleased=true;} });
-app.addHook('onResponse', async request => { if(request.db&&!request.dbReleased){await request.db.query('COMMIT').catch(()=>{});request.db.release();request.dbReleased=true;} });
+app.addHook('onSend', async (request, _reply, payload) => {
+  if(request.db&&!request.dbReleased){await request.db.query('COMMIT');request.db.release();request.dbReleased=true;}
+  return payload;
+});
 const text = (value, max = 120) => typeof value === 'string' && value.trim().length > 0 && value.trim().length <= max;
 const phone = value => typeof value === 'string' && /^[+()\d .-]{8,24}$/.test(value);
 const money = value => Number.isFinite(Number(value)) && Number(value) >= 0 && Number(value) <= 10000000;
@@ -369,5 +372,7 @@ async function start() {
   await seed(); if(isStorageConfigured())await ensureBucket(); await live.connect(); await live.query('LISTEN wedding_changes');
   await app.listen({host:process.env.HOST||'127.0.0.1',port:Number(process.env.PORT)||3000});
 }
-for (const signal of ['SIGINT','SIGTERM']) process.on(signal,async()=>{await app.close();await live.end().catch(()=>{});await pool.end();await closeStorage();process.exit(0);});
-start().catch(async error=>{app.log.error(error);await app.close();await live.end().catch(()=>{});await pool.end();await closeStorage();process.exit(1);});
+let shuttingDown=false;
+async function shutdown(){if(shuttingDown)return;shuttingDown=true;await app.close().catch(()=>{});await live.end().catch(()=>{});await pool.end().catch(()=>{});await closeStorage().catch(()=>{});}
+for (const signal of ['SIGINT','SIGTERM']) process.on(signal,async()=>{await shutdown();process.exit(0);});
+start().catch(async error=>{app.log.error(error);await shutdown();process.exit(1);});
