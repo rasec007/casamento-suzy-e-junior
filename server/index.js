@@ -22,7 +22,7 @@ const live = new pg.Client({ connectionString: process.env.DATABASE_URL, applica
 await app.register(cookie, { secret: process.env.SESSION_SECRET || 'development-only-secret-change-this-now' });
 await app.register(helmet, { global: true, contentSecurityPolicy: { directives: { defaultSrc: ["'self'"], styleSrc: ["'self'", 'https://fonts.googleapis.com'], fontSrc: ["'self'", 'https://fonts.gstatic.com'], imgSrc: ["'self'", 'data:'], scriptSrc: ["'self'"], connectSrc: ["'self'"], objectSrc: ["'none'"], upgradeInsecureRequests: null } } });
 await app.register(rateLimit, { global: true, max: 180, timeWindow: '1 minute' });
-await app.register(multipart, { limits: { fileSize: 5 * 1024 * 1024, files: 1, fields: 3, parts: 4 } });
+await app.register(multipart, { limits: { fileSize: 5 * 1024 * 1024, files: 1, fields: 8, parts: 10 } });
 await app.register(fastifyStatic, { root: join(root, '../public'), prefix: '/', maxAge: process.env.NODE_ENV === 'production' ? '1h' : 0, immutable: false, wildcard: false });
 
 async function requireAdmin(request, reply) {
@@ -44,13 +44,20 @@ app.addHook('preHandler', sameOrigin);
 const text = (value, max = 120) => typeof value === 'string' && value.trim().length > 0 && value.trim().length <= max;
 const phone = value => typeof value === 'string' && /^[+()\d .-]{8,24}$/.test(value);
 const money = value => Number.isFinite(Number(value)) && Number(value) >= 0 && Number(value) <= 10000000;
+const isoDate = value => typeof value==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(value)&&!Number.isNaN(new Date(`${value}T12:00:00-03:00`).valueOf())&&new Date(`${value}T12:00:00-03:00`).toISOString().slice(0,10)===value;
 const publicGuestFields = 'id, name, companions, created_at';
 const publicMemoryFields = 'id, sender_name, gift_title, gift_amount, message, created_at';
 const date = value => new Date(value).toLocaleDateString('pt-BR', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'America/Fortaleza' });
 const seedDate = value => { const [day, month, year] = value.replace('.', '').split(' '); const months = { Jan:0, Fev:1, Mar:2, Abr:3, Mai:4, Jun:5, Jul:6, Ago:7, Set:8, Out:9, Nov:10, Dez:11 }; return new Date(Date.UTC(Number(year), months[month], Number(day), 15)).toISOString(); };
 const guestOut = row => ({ id: row.id, name: row.name, companions: row.companions, confirmedAt: date(row.created_at) });
 const memoryOut = row => ({ id: row.id, senderName: row.sender_name, giftTitle: row.gift_title, giftAmount: Number(row.gift_amount), message: row.message, createdAt: date(row.created_at) });
-const giftOut = row => ({ ...row, price: Number(row.price) });
+const giftOut = row => ({ id:row.id,title:row.title,category:row.category,price:Number(row.price),description:row.description,imageUrl:row.image_url||'',isGifted:row.is_gifted,giftedBy:row.gifted_by||'' });
+function imageFormat(buffer){
+  if(buffer.length>=3&&buffer[0]===0xff&&buffer[1]===0xd8&&buffer[2]===0xff)return {ext:'jpg',type:'image/jpeg'};
+  if(buffer.length>=8&&buffer.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])))return {ext:'png',type:'image/png'};
+  if(buffer.length>=12&&buffer.toString('ascii',0,4)==='RIFF'&&buffer.toString('ascii',8,12)==='WEBP')return {ext:'webp',type:'image/webp'};
+  return null;
+}
 
 async function seed() {
   await pool.query(await readFile(join(root, 'schema.sql'), 'utf8'));
@@ -78,13 +85,14 @@ app.get('/api/site', async () => {
     pool.query('SELECT * FROM gifts ORDER BY id'),
     pool.query(`SELECT ${publicMemoryFields} FROM memories WHERE is_visible ORDER BY created_at DESC LIMIT 100`),
     pool.query(`SELECT ${publicGuestFields} FROM guests WHERE is_visible ORDER BY created_at DESC LIMIT 250`),
-    pool.query("SELECT value FROM site_settings WHERE key IN ('venue_ceremony','venue_reception') ORDER BY key")
+    pool.query("SELECT key,value FROM site_settings WHERE key IN ('venue_ceremony','venue_reception','story_content','event_schedule') ORDER BY key")
   ]);
-  return { gifts: gifts.rows.map(giftOut), memories: memories.rows.map(memoryOut), guests: guests.rows.map(guestOut), venues: venues.rows.map(r=>r.value) };
+  const settings=Object.fromEntries(venues.rows.map(r=>[r.key,r.value]));
+  return { gifts: gifts.rows.map(giftOut), memories: memories.rows.map(memoryOut), guests: guests.rows.map(guestOut), venues: ['venue_ceremony','venue_reception'].map(k=>settings[k]).filter(Boolean), story:settings.story_content||null, event:settings.event_schedule||null };
 });
 app.get('/media/*', async (req, reply) => {
   const key=req.params['*'];
-  if(!/^venues\/(ceremony|reception)\/[a-f0-9-]{36}\.(jpg|png|webp)$/.test(key)) return reply.code(404).send({error:'Imagem não encontrada.'});
+  if(!/^(?:venues\/(?:ceremony|reception)|gifts)\/[a-f0-9-]{36}\.(jpg|png|webp)$/.test(key)) return reply.code(404).send({error:'Imagem não encontrada.'});
   try {
     const image=await getImage(key);
     reply.header('content-type',image.ContentType||'application/octet-stream').header('cache-control',image.CacheControl||'public, max-age=31536000, immutable').header('x-content-type-options','nosniff');
@@ -94,6 +102,9 @@ app.get('/media/*', async (req, reply) => {
 app.post('/api/rsvp', { config: { rateLimit: { max: 5, timeWindow: '15 minutes' } } }, async (req, reply) => {
   const { name, whatsapp, companions = 0 } = req.body || {};
   if (!text(name, 120) || !phone(whatsapp) || !Number.isInteger(companions) || companions < 0 || companions > 4) return reply.code(400).send({ error: 'Confira nome, WhatsApp e quantidade de acompanhantes.' });
+  const schedule=await pool.query("SELECT value->>'rsvpDeadline' AS deadline FROM site_settings WHERE key='event_schedule'");
+  const today=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Fortaleza',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+  if(schedule.rows[0]?.deadline&&today>schedule.rows[0].deadline)return reply.code(409).send({error:'O prazo para confirmar presença foi encerrado.'});
   const result = await pool.query('INSERT INTO guests(name,whatsapp,companions) VALUES($1,$2,$3) RETURNING id,name,companions,created_at', [name.trim(),whatsapp.trim(),companions]);
   let notificationSent = false;
   try { notificationSent = await sendRsvpConfirmation({ name: name.trim(), whatsapp: whatsapp.trim(), companions }); }
@@ -103,10 +114,30 @@ app.post('/api/rsvp', { config: { rateLimit: { max: 5, timeWindow: '15 minutes' 
 app.post('/api/memories', { config: { rateLimit: { max: 5, timeWindow: '15 minutes' } } }, async (req, reply) => {
   const { senderName, whatsapp, message = '', giftId } = req.body || {};
   if (!text(senderName, 120) || !phone(whatsapp) || typeof message !== 'string' || message.length > 1000 || !text(giftId, 40)) return reply.code(400).send({ error: 'Confira seus dados e a mensagem (até 1.000 caracteres).' });
-  const gift = await pool.query('SELECT title,price FROM gifts WHERE id=$1', [giftId]);
-  if (!gift.rowCount) return reply.code(404).send({ error: 'Presente não encontrado.' });
-  const result = await pool.query('INSERT INTO memories(sender_name,whatsapp,gift_title,gift_amount,message) VALUES($1,$2,$3,$4,$5) RETURNING id,sender_name,gift_title,gift_amount,message,created_at', [senderName.trim(),whatsapp.trim(),gift.rows[0].title,gift.rows[0].price,message.trim()]);
-  return reply.code(201).send({ memory: memoryOut(result.rows[0]) });
+  const db=await pool.connect();let result;
+  try{
+    await db.query('BEGIN');
+    const gift=await db.query('SELECT id,title,price,is_gifted FROM gifts WHERE id=$1 FOR UPDATE',[giftId]);
+    if(!gift.rowCount){await db.query('ROLLBACK');return reply.code(404).send({error:'Presente não encontrado.'})}
+    if(gift.rows[0].is_gifted){await db.query('ROLLBACK');return reply.code(409).send({error:'Este presente já foi confirmado por outra pessoa. Escolha outro item.'})}
+    await db.query('UPDATE gifts SET is_gifted=true,gifted_by=$2 WHERE id=$1',[giftId,senderName.trim()]);
+    if(message.trim()){
+      const confirmed=await db.query('SELECT 1 FROM guests WHERE lower(name)=lower($1) LIMIT 1',[senderName.trim()]);
+      if(!confirmed.rowCount){await db.query('ROLLBACK');return reply.code(400).send({error:'Confirme a presença antes de enviar uma dedicatória. A dedicatória é opcional.'})}
+      result=await db.query('INSERT INTO memories(gift_id,sender_name,whatsapp,gift_title,gift_amount,message) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,sender_name,gift_title,gift_amount,message,created_at',[giftId,senderName.trim(),whatsapp.trim(),gift.rows[0].title,gift.rows[0].price,message.trim()]);
+    }
+    await db.query('COMMIT');
+  }catch(error){await db.query('ROLLBACK').catch(()=>{});throw error}finally{db.release()}
+  return reply.code(201).send({ memory:result?memoryOut(result.rows[0]):null });
+});
+app.post('/api/admin/memories', { preHandler: requireAdmin }, async (req,reply)=>{
+  const {senderName,message='',writtenAt}=req.body||{};
+  if(!text(senderName,120)||typeof message!=='string'||message.length>1000||!isoDate(writtenAt))return reply.code(400).send({error:'Confira o convidado, a frase (até 1.000 caracteres) e a data.'});
+  const guest=await pool.query('SELECT id FROM guests WHERE lower(name)=lower($1) LIMIT 1',[senderName.trim()]);
+  if(!guest.rowCount)return reply.code(400).send({error:'A dedicatória só pode ser associada a alguém com presença confirmada.'});
+  const createdAt=new Date(`${writtenAt}T12:00:00-03:00`);
+  const result=await pool.query("INSERT INTO memories(sender_name,whatsapp,gift_title,gift_amount,message,created_at) VALUES($1,'','Dedicatória',0,$2,$3) RETURNING id,sender_name,gift_title,gift_amount,message,created_at",[senderName.trim(),message.trim(),createdAt]);
+  return reply.code(201).send({memory:memoryOut(result.rows[0])});
 });
 app.post('/api/admin/login', { config: { rateLimit: { max: 5, timeWindow: '15 minutes' } } }, async (req, reply) => {
   const expected = process.env.ADMIN_PASSWORD;
@@ -119,8 +150,69 @@ app.post('/api/admin/login', { config: { rateLimit: { max: 5, timeWindow: '15 mi
 });
 app.post('/api/admin/logout', { preHandler: requireAdmin }, async (_req, reply) => { reply.clearCookie('admin_session', { path: '/' }); return { ok: true }; });
 app.get('/api/admin/data', { preHandler: requireAdmin }, async () => {
-  const [memories, guests, suppliers, venues] = await Promise.all([pool.query('SELECT * FROM memories ORDER BY created_at DESC'), pool.query('SELECT * FROM guests ORDER BY created_at DESC'), pool.query('SELECT * FROM suppliers ORDER BY name'),pool.query("SELECT value FROM site_settings WHERE key IN ('venue_ceremony','venue_reception') ORDER BY key")]);
-  return { memories: memories.rows.map(r => ({ ...memoryOut(r), whatsapp:r.whatsapp, isVisible:r.is_visible })), guests: guests.rows.map(r => ({ ...guestOut(r), whatsapp:r.whatsapp, isVisible:r.is_visible })), suppliers: suppliers.rows.map(r => ({ id:r.id,name:r.name,role:r.role,contact:r.contact,cost:Number(r.cost),paidAmount:Number(r.paid_amount),status:r.status,isVisible:r.is_visible })), venues: venues.rows.map(r=>r.value) };
+  const [memories, guests, suppliers, gifts, settings] = await Promise.all([pool.query('SELECT * FROM memories ORDER BY created_at DESC'), pool.query('SELECT * FROM guests ORDER BY created_at DESC'), pool.query('SELECT * FROM suppliers ORDER BY name'),pool.query('SELECT * FROM gifts ORDER BY category,title'),pool.query("SELECT key,value FROM site_settings WHERE key IN ('venue_ceremony','venue_reception','story_content','event_schedule') ORDER BY key")]);
+  const values=Object.fromEntries(settings.rows.map(r=>[r.key,r.value]));
+  return { memories: memories.rows.map(r => ({ ...memoryOut(r), whatsapp:r.whatsapp, isVisible:r.is_visible })), guests: guests.rows.map(r => ({ ...guestOut(r), whatsapp:r.whatsapp, isVisible:r.is_visible })), suppliers: suppliers.rows.map(r => ({ id:r.id,name:r.name,role:r.role,contact:r.contact,cost:Number(r.cost),paidAmount:Number(r.paid_amount),status:r.status,isVisible:r.is_visible })), gifts:gifts.rows.map(giftOut), venues: ['venue_ceremony','venue_reception'].map(k=>values[k]).filter(Boolean), story:values.story_content||null, event:values.event_schedule||null };
+});
+app.patch('/api/admin/event-schedule', { preHandler: requireAdmin }, async (req,reply)=>{
+  const {eventDate,eventTime,rsvpDeadline}=req.body||{};
+  if(!isoDate(eventDate)||!isoDate(rsvpDeadline)||typeof eventTime!=='string'||!/^([01]\d|2[0-3]):[0-5]\d$/.test(eventTime))return reply.code(400).send({error:'Informe uma data válida para o evento, horário e prazo do RSVP.'});
+  const event={eventDate,eventTime,rsvpDeadline};
+  await pool.query("UPDATE site_settings SET value=$1::jsonb,updated_at=now() WHERE key='event_schedule'",[JSON.stringify(event)]);
+  return {ok:true,event};
+});
+app.post('/api/admin/gifts', { preHandler: requireAdmin, bodyLimit: 5 * 1024 * 1024 + 64 * 1024 }, async (req,reply)=>{
+  const fields={};let imageBuffer;
+  for await(const part of req.parts()){
+    if(part.type==='file'){if(part.fieldname==='image')imageBuffer=await part.toBuffer();else await part.toBuffer()}
+    else fields[part.fieldname]=part.value;
+  }
+  const {title,category,description,price}=fields,format=imageBuffer&&imageFormat(imageBuffer);
+  if(!text(title,180)||!text(category,80)||!text(description,1000)||!money(Number(price))||!format)return reply.code(400).send({error:'Informe nome, categoria, descrição, valor e uma foto JPG, PNG ou WebP válida.'});
+  if(!isStorageConfigured())return reply.code(503).send({error:'Armazenamento de imagens não configurado.'});
+  const id=randomUUID(),key=`gifts/${id}.${format.ext}`;await putImage(key,imageBuffer,format.type);
+  try{await pool.query('INSERT INTO gifts(id,title,category,price,description,image_url,image_key) VALUES($1,$2,$3,$4,$5,$6,$7)',[id,title.trim(),category.trim(),Number(price),description.trim(),`/media/${key}`,key])}
+  catch(error){await deleteImage(key).catch(()=>{});throw error}
+  return reply.code(201).send({id,imageUrl:`/media/${key}`});
+});
+app.patch('/api/admin/gifts/:giftId', { preHandler: requireAdmin }, async (req,reply)=>{
+  const {title,category,description,price}=req.body||{},entries=[];
+  if(title!==undefined){if(!text(title,180))return reply.code(400).send({error:'Nome inválido.'});entries.push(['title',title.trim()])}
+  if(category!==undefined){if(!text(category,80))return reply.code(400).send({error:'Categoria inválida.'});entries.push(['category',category.trim()])}
+  if(description!==undefined){if(!text(description,1000))return reply.code(400).send({error:'Descrição inválida.'});entries.push(['description',description.trim()])}
+  if(price!==undefined){if(!money(price))return reply.code(400).send({error:'Valor inválido.'});entries.push(['price',Number(price)])}
+  if(!entries.length)return reply.code(400).send({error:'Informe ao menos um campo para atualizar.'});
+  const setters=entries.map(([key],i)=>`${key}=$${i+1}`),result=await pool.query(`UPDATE gifts SET ${setters.join(',')} WHERE id=$${entries.length+1} RETURNING id`,[...entries.map(([,value])=>value),req.params.giftId]);
+  return result.rowCount?{ok:true}:reply.code(404).send({error:'Presente não encontrado.'});
+});
+app.delete('/api/admin/gifts/:giftId', { preHandler: requireAdmin }, async (req,reply)=>{
+  const db=await pool.connect();let imageKey;
+  try{
+    await db.query('BEGIN');const gift=await db.query('SELECT image_key,is_gifted FROM gifts WHERE id=$1 FOR UPDATE',[req.params.giftId]);
+    if(!gift.rowCount){await db.query('ROLLBACK');return reply.code(404).send({error:'Presente não encontrado.'})}
+    if(gift.rows[0].is_gifted){await db.query('ROLLBACK');return reply.code(409).send({error:'Este presente já foi confirmado e não pode ser removido da lista.'})}
+    imageKey=gift.rows[0].image_key;await db.query('DELETE FROM gifts WHERE id=$1',[req.params.giftId]);await db.query('COMMIT');
+  }catch(error){await db.query('ROLLBACK').catch(()=>{});throw error}finally{db.release()}
+  if(imageKey)await deleteImage(imageKey).catch(error=>req.log.warn({err:error},'A imagem do presente permaneceu no armazenamento.'));
+  return {ok:true};
+});
+app.post('/api/admin/gifts/:giftId/image', { preHandler: requireAdmin, bodyLimit: 5 * 1024 * 1024 + 64 * 1024 }, async (req,reply)=>{
+  if(!isStorageConfigured())return reply.code(503).send({error:'Armazenamento de imagens não configurado.'});
+  const part=await req.file();if(!part)return reply.code(400).send({error:'Selecione uma imagem JPG, PNG ou WebP.'});
+  const buffer=await part.toBuffer(),format=imageFormat(buffer);if(!format)return reply.code(400).send({error:'O arquivo não parece ser uma imagem JPG, PNG ou WebP válida.'});
+  const current=await pool.query('SELECT image_key FROM gifts WHERE id=$1',[req.params.giftId]);if(!current.rowCount)return reply.code(404).send({error:'Presente não encontrado.'});
+  const key=`gifts/${randomUUID()}.${format.ext}`;await putImage(key,buffer,format.type);
+  try{await pool.query('UPDATE gifts SET image_key=$2,image_url=$3 WHERE id=$1',[req.params.giftId,key,`/media/${key}`])}catch(error){await deleteImage(key).catch(()=>{});throw error}
+  if(current.rows[0].image_key)await deleteImage(current.rows[0].image_key).catch(error=>req.log.warn({err:error},'A imagem anterior do presente permaneceu no armazenamento.'));
+  return {ok:true,imageUrl:`/media/${key}`};
+});
+app.patch('/api/admin/story', { preHandler: requireAdmin }, async (req,reply)=>{
+  const b=req.body||{};
+  const validFacts=Array.isArray(b.facts)&&b.facts.length>=1&&b.facts.length<=12&&b.facts.every(v=>text(v,120));
+  if(!text(b.eyebrow,100)||!text(b.title,100)||!text(b.body,3000)||!validFacts||!text(b.question,180)||!text(b.answer,180))return reply.code(400).send({error:'Confira os textos e informe de 1 a 12 fatos, um por linha.'});
+  const story={eyebrow:b.eyebrow.trim(),title:b.title.trim(),body:b.body.trim(),facts:b.facts.map(v=>v.trim()),question:b.question.trim(),answer:b.answer.trim()};
+  await pool.query("UPDATE site_settings SET value=$1::jsonb,updated_at=now() WHERE key='story_content'",[JSON.stringify(story)]);
+  return {ok:true,story};
 });
 app.patch('/api/admin/venues/:venueId', { preHandler: requireAdmin }, async (req,reply)=>{
   const id=req.params.venueId, b=req.body||{};
