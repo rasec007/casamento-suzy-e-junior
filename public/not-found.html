@@ -18,9 +18,19 @@
       <input id="site-url" name="siteUrl" type="text" required autocomplete="url" spellcheck="false" placeholder="https://seusite.com.br/casamento/nome-do-casal">
       <div class="form-actions">
         <button type="submit" name="destination" value="site">Acessar site</button>
-        <button type="submit" name="destination" value="panel" class="panel-button">Acessar painel dos noivos</button>
+        <button type="button" id="show-admin-login" class="panel-button">Acessar painel dos noivos</button>
       </div>
       <p id="url-status" role="status" aria-live="polite"></p>
+    </form>
+    <form id="admin-login-form" class="admin-login-form" hidden>
+      <h2>Acesso dos noivos</h2>
+      <label for="admin-email">E-mail</label>
+      <input id="admin-email" name="email" type="email" required autocomplete="username" maxlength="254">
+      <label for="admin-password">Senha</label>
+      <input id="admin-password" name="password" type="password" required autocomplete="current-password" maxlength="200">
+      <div id="wedding-choice"></div>
+      <button type="submit">Entrar no painel</button>
+      <p id="login-status" role="status" aria-live="polite"></p>
     </form>
   </main>
 </body>

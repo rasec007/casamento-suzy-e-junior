@@ -48,7 +48,10 @@ MINIO_SERVER_URL=https://SEU_ENDPOINT_S3
 MINIO_ROOT_USER=USUARIO_MINIO
 MINIO_ROOT_PASSWORD=SENHA_MINIO
 MINIO_BUCKET=suzy-junior-wedding
+PAYMENTS_ENCRYPTION_KEY=SEGREDO_HEXADECIMAL_DE_64_CARACTERES
 ```
+
+Gere `PAYMENTS_ENCRYPTION_KEY` com `openssl rand -hex 32` e guarde uma cópia segura. Ela criptografa no banco as chaves Asaas que cada casal cadastra no painel. Não a troque sem recriptografar as chaves já salvas. As credenciais Asaas são inseridas individualmente por casamento em **Painel dos Noivos → Pagamentos**; não coloque chaves de casal no ambiente global do servidor.
 
 Use no `DATABASE_URL` a senha gerada para `suzy_junior_app` e o hostname/porta atuais do banco externo. Se a senha tiver caracteres reservados em URL (`@`, `:`, `/`, `?`, `#`, `%`), faça percent-encoding antes de montá-la. A senha gerada para a role neste ambiente contém somente hexadecimal e pode ser usada diretamente.
 

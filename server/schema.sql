@@ -53,6 +53,46 @@ CREATE TABLE IF NOT EXISTS admin_users (
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE(wedding_id, username), UNIQUE(wedding_id, email)
 );
+CREATE TABLE IF NOT EXISTS payment_integrations (
+  wedding_id uuid PRIMARY KEY REFERENCES weddings(id) ON DELETE CASCADE,
+  environment varchar(12) NOT NULL DEFAULT 'sandbox' CHECK (environment IN ('sandbox','production')),
+  api_key_cipher text NOT NULL,
+  webhook_token_hash char(64) NOT NULL,
+  webhook_token_cipher text NOT NULL,
+  is_active boolean NOT NULL DEFAULT false,
+  last_tested_at timestamptz,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS gift_payments (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  wedding_id uuid NOT NULL REFERENCES weddings(id) ON DELETE CASCADE,
+  gift_id text NOT NULL REFERENCES gifts(id),
+  gift_title varchar(180) NOT NULL,
+  guest_id uuid NOT NULL REFERENCES guests(id),
+  sender_name varchar(120) NOT NULL,
+  whatsapp varchar(24) NOT NULL,
+  dedication varchar(1000) NOT NULL DEFAULT '',
+  amount numeric(10,2) NOT NULL CHECK (amount > 0),
+  status varchar(24) NOT NULL DEFAULT 'CREATING' CHECK (status IN ('CREATING','PENDING','PAID','PAID_DUPLICATE','EXPIRED','CANCELED','FAILED','REFUND_PENDING','PARTIAL_REFUND','REFUNDED','CHARGEBACK')),
+  checkout_id varchar(80),
+  checkout_url text,
+  expires_at timestamptz NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE gift_payments ADD COLUMN IF NOT EXISTS gift_title varchar(180) NOT NULL DEFAULT '';
+ALTER TABLE gift_payments DROP CONSTRAINT IF EXISTS gift_payments_status_check;
+ALTER TABLE gift_payments ADD CONSTRAINT gift_payments_status_check CHECK (status IN ('CREATING','PENDING','PAID','PAID_DUPLICATE','EXPIRED','CANCELED','FAILED','REFUND_PENDING','PARTIAL_REFUND','REFUNDED','CHARGEBACK'));
+CREATE UNIQUE INDEX IF NOT EXISTS gift_payments_checkout_tenant_idx ON gift_payments(wedding_id,checkout_id) WHERE checkout_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS gift_payments_one_active_per_gift_idx ON gift_payments(wedding_id,gift_id) WHERE status IN ('CREATING','PENDING');
+CREATE INDEX IF NOT EXISTS gift_payments_tenant_created_idx ON gift_payments(wedding_id,created_at DESC);
+CREATE TABLE IF NOT EXISTS asaas_webhook_events (
+  wedding_id uuid NOT NULL REFERENCES weddings(id) ON DELETE CASCADE,
+  event_id varchar(255) NOT NULL,
+  event_type varchar(100) NOT NULL,
+  received_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (wedding_id,event_id)
+);
 ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS wedding_id uuid REFERENCES weddings(id) ON DELETE CASCADE;
 UPDATE admin_users SET wedding_id=(SELECT id FROM weddings WHERE slug='suzy-e-junior') WHERE wedding_id IS NULL;
 ALTER TABLE admin_users ALTER COLUMN wedding_id SET NOT NULL;
@@ -81,7 +121,7 @@ INSERT INTO site_settings(wedding_id,key,value) SELECT w.id,v.key,v.value::jsonb
 ('design_theme', '{"preset":"dourado-classico","colors":{"background":"#0a0d14","panel":"#101520","text":"#ebebeb","accent":"#c0a062","button":"#c0a062","buttonHover":"#d4b475","buttonText":"#0a0d14"},"fonts":{"heading":"Cinzel","body":"Montserrat"},"heroImage":"/images/hero_wedding_hall_1791245517448.jpg","heroImageKey":""}')
 ) AS v(key,value) WHERE w.slug='suzy-e-junior' ON CONFLICT(wedding_id,key) DO NOTHING;
 DO $$ DECLARE tbl text; BEGIN
-  FOREACH tbl IN ARRAY ARRAY['gifts','memories','guests','suppliers','site_settings','admin_users'] LOOP
+    FOREACH tbl IN ARRAY ARRAY['gifts','memories','guests','suppliers','site_settings','admin_users','payment_integrations','gift_payments','asaas_webhook_events'] LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', tbl);
     EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', tbl);
     EXECUTE format('DROP POLICY IF EXISTS wedding_isolation ON %I', tbl);
@@ -89,6 +129,7 @@ DO $$ DECLARE tbl text; BEGIN
   END LOOP;
 END $$;
 CREATE INDEX IF NOT EXISTS gifts_tenant_order_idx ON gifts (wedding_id,id);
+CREATE INDEX IF NOT EXISTS gift_payments_pending_expiry_idx ON gift_payments(wedding_id,expires_at) WHERE status IN ('CREATING','PENDING');
 CREATE INDEX IF NOT EXISTS memories_tenant_created_idx ON memories (wedding_id,created_at DESC);
 CREATE INDEX IF NOT EXISTS guests_tenant_created_idx ON guests (wedding_id,created_at DESC);
 CREATE INDEX IF NOT EXISTS suppliers_tenant_name_idx ON suppliers (wedding_id,name);
@@ -108,3 +149,5 @@ DROP TRIGGER IF EXISTS site_settings_notify ON site_settings;
 CREATE TRIGGER site_settings_notify AFTER INSERT OR UPDATE OR DELETE ON site_settings FOR EACH ROW EXECUTE FUNCTION notify_wedding_change();
 DROP TRIGGER IF EXISTS gifts_notify ON gifts;
 CREATE TRIGGER gifts_notify AFTER INSERT OR UPDATE OR DELETE ON gifts FOR EACH ROW EXECUTE FUNCTION notify_wedding_change();
+DROP TRIGGER IF EXISTS gift_payments_notify ON gift_payments;
+CREATE TRIGGER gift_payments_notify AFTER INSERT OR UPDATE OR DELETE ON gift_payments FOR EACH ROW EXECUTE FUNCTION notify_wedding_change();

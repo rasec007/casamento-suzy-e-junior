@@ -29,6 +29,7 @@ O passo a passo para publicar no VPS com EasyPanel está em [`docs/easypanel-vps
 
 - Página pública: história, locais, presentes, Penseira, RSVP e Espelho de Ojesed.
 - Área administrativa protegida: visão financeira resumida e gerenciamento de mensagens, confirmações e fornecedores.
+- Pagamentos por casamento com conta própria Asaas, Sandbox/produção, Checkout hospedado (Pix e cartão), Webhooks idempotentes e credenciais criptografadas no servidor. Veja [`docs/asaas-payments.md`](docs/asaas-payments.md) para configurar e homologar.
 - Privacidade: telefones aparecem apenas no painel dos noivos; não são incluídos nas respostas públicas.
-- RSVP e mensagens são persistidos no PostgreSQL. O protótipo de presente registra intenção e mensagem, sem processar pagamento.
+- RSVP e mensagens são persistidos no PostgreSQL. Enquanto o Asaas não estiver ativado, o site mantém o registro manual de intenção de presente; depois de ativado, só o Webhook confirma o presente pago.
 - Um RSVP válido recebe confirmação pelo WhatsApp informado; se a EvolutionAPI estiver fora, a presença permanece salva e o formulário avisa que o envio falhou.

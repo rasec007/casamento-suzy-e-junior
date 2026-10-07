@@ -13,6 +13,7 @@ import { createHash, timingSafeEqual, randomUUID, scrypt as scryptCallback, rand
 import { promisify } from 'node:util';
 import { INITIAL_GIFTS, INITIAL_MEMORIES, INITIAL_GUESTS, INITIAL_SUPPLIERS } from './seed-data.js';
 import { sendRsvpConfirmation } from './evolution.js';
+import { asaasRequest, decryptSecret, encryptSecret, hashWebhookToken, secureTokenMatches } from './asaas.js';
 import { isStorageConfigured, ensureBucket, putImage, getImage, deleteImage, closeStorage } from './storage.js';
 
 const root = dirname(fileURLToPath(import.meta.url));
@@ -78,8 +79,9 @@ function sameOrigin(request, reply, done) {
 }
 app.addHook('preHandler', sameOrigin);
 app.addHook('preHandler', async (request, reply) => {
-  if (!request.url.startsWith('/api/') || request.url.startsWith('/api/health') || request.url.startsWith('/api/admin/register') || request.url.startsWith('/api/events')) return;
+  if (!request.url.startsWith('/api/') || request.url.startsWith('/api/health') || request.url.startsWith('/api/admin/register') || request.url.startsWith('/api/events') || request.url.startsWith('/api/webhooks/asaas/')) return;
   const requestedSlug = request.headers['x-wedding-slug'] || new URL(request.url, 'http://local').searchParams.get('wedding');
+  if (request.url.startsWith('/api/admin/login') && !requestedSlug) { request.globalAdminLogin = true; return; }
   if (!requestedSlug) return reply.code(400).send({error:'URL incompleta: informe o slug do casamento, por exemplo /casamento/nome-do-casal.'});
   if (typeof requestedSlug !== 'string' || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(requestedSlug)) return reply.code(400).send({error:'Slug de casamento inválido.'});
   const found = await pool.query('SELECT id,title FROM weddings WHERE slug=$1', [requestedSlug]);
@@ -95,7 +97,9 @@ app.addHook('onSend', async (request, _reply, payload) => {
 });
 const text = (value, max = 120) => typeof value === 'string' && value.trim().length > 0 && value.trim().length <= max;
 const phone = value => typeof value === 'string' && /^[+()\d .-]{8,24}$/.test(value);
+const normalizeBrazilianPhone = value => { const digits=String(value||'').replace(/\D/g,'');return digits.startsWith('55')&&[12,13].includes(digits.length)?digits.slice(2):digits; };
 const money = value => Number.isFinite(Number(value)) && Number(value) >= 0 && Number(value) <= 10000000;
+const paymentsWebhookBase = request => process.env.PAYMENTS_WEBHOOK_BASE_URL || (process.env.NODE_ENV==='production'&&process.env.APP_URL?process.env.APP_URL:`${request.protocol}://${request.headers.host}`);
 const isoDate = value => typeof value==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(value)&&!Number.isNaN(new Date(`${value}T12:00:00-03:00`).valueOf())&&new Date(`${value}T12:00:00-03:00`).toISOString().slice(0,10)===value;
 const publicGuestFields = 'id, name, companions, created_at';
 const publicMemoryFields = 'id, sender_name, gift_title, gift_amount, message, created_at';
@@ -139,14 +143,18 @@ app.get('/api/health', async (_req, reply) => {
   catch { return reply.code(503).send({ status: 'unavailable' }); }
 });
 app.get('/api/site', async (req) => {
-  const [gifts, memories, guests, venues] = await Promise.all([
+  const [gifts, memories, guests, venues, paymentIntegration] = await Promise.all([
     req.db.query('SELECT * FROM gifts ORDER BY id'),
     req.db.query(`SELECT ${publicMemoryFields} FROM memories WHERE is_visible ORDER BY created_at DESC LIMIT 100`),
     req.db.query(`SELECT ${publicGuestFields} FROM guests WHERE is_visible ORDER BY created_at DESC LIMIT 250`),
     req.db.query("SELECT key,value FROM site_settings WHERE key IN ('venue_ceremony','venue_reception','story_content','event_schedule','design_theme') ORDER BY key")
+    ,req.db.query('SELECT is_active FROM payment_integrations WHERE wedding_id=$1',[req.weddingId])
   ]);
   const settings=Object.fromEntries(venues.rows.map(r=>[r.key,r.value]));
-  return { wedding:{slug:req.weddingSlug,title:req.weddingTitle}, gifts: gifts.rows.map(giftOut), memories: memories.rows.map(memoryOut), guests: guests.rows.map(guestOut), venues: ['venue_ceremony','venue_reception'].map(k=>settings[k]).filter(Boolean), story:settings.story_content||null, event:settings.event_schedule||null, design:settings.design_theme||null };
+  const activePayments=Boolean(paymentIntegration.rows[0]?.is_active);
+  const pending=activePayments?await req.db.query("SELECT DISTINCT gift_id FROM gift_payments WHERE wedding_id=$1 AND status IN ('CREATING','PENDING') AND expires_at>now()",[req.weddingId]):{rows:[]};
+  const reserved=new Set(pending.rows.map(row=>row.gift_id));
+  return { wedding:{slug:req.weddingSlug,title:req.weddingTitle}, gifts: gifts.rows.map(row=>({...giftOut(row),isReserved:reserved.has(row.id)})), memories: memories.rows.map(memoryOut), guests: guests.rows.map(guestOut), venues: ['venue_ceremony','venue_reception'].map(k=>settings[k]).filter(Boolean), story:settings.story_content||null, event:settings.event_schedule||null, design:settings.design_theme||null, paymentsEnabled:activePayments };
 });
 app.get('/api/theme.css', async(req,reply)=>{
   const result=await req.db.query("SELECT value FROM site_settings WHERE key='design_theme'");
@@ -181,6 +189,8 @@ app.post('/api/rsvp', { config: { rateLimit: { max: 5, timeWindow: '15 minutes' 
 app.post('/api/memories', { config: { rateLimit: { max: 5, timeWindow: '15 minutes' } } }, async (req, reply) => {
   const { senderName, whatsapp, message = '', giftId } = req.body || {};
   if (!text(senderName, 120) || !phone(whatsapp) || typeof message !== 'string' || message.length > 1000 || !text(giftId, 40)) return reply.code(400).send({ error: 'Confira seus dados e a mensagem (até 1.000 caracteres).' });
+  const paymentConfig=await req.db.query('SELECT is_active FROM payment_integrations WHERE wedding_id=$1',[req.weddingId]);
+  if(paymentConfig.rows[0]?.is_active)return reply.code(409).send({error:'Este casamento recebe presentes pelo checkout seguro. Escolha o presente e use o botão de pagamento.'});
   const db=req.db;let result;
   try{
     const gift=await db.query('SELECT id,title,price,is_gifted FROM gifts WHERE id=$1 FOR UPDATE',[giftId]);
@@ -240,12 +250,34 @@ app.post('/api/admin/register', { config: { rateLimit: { max: 3, timeWindow: '15
   finally { db.release(); }
 });
 app.post('/api/admin/login', { config: { rateLimit: { max: 5, timeWindow: '15 minutes' } } }, async (req, reply) => {
-  const { identifier, password } = req.body || {};
+  const { identifier: suppliedIdentifier, email, password } = req.body || {};
+  const identifier = email || suppliedIdentifier;
   if (typeof identifier !== 'string' || identifier.length > 254 || typeof password !== 'string' || password.length > 200) return reply.code(401).send({ error: 'Usuário/e-mail ou senha inválidos.' });
+  if (req.globalAdminLogin) {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(identifier.trim())) return reply.code(401).send({ error: 'Usuário/e-mail ou senha inválidos.' });
+    const tenants = await pool.query('SELECT id,slug,title FROM weddings ORDER BY created_at');
+    const matches = [];
+    for (const tenant of tenants.rows) {
+      const db = await pool.connect();
+      try {
+        await db.query('BEGIN');
+        await db.query("SELECT set_config('app.wedding_id',$1,true)", [tenant.id]);
+        const result = await db.query('SELECT id,password_hash FROM admin_users WHERE wedding_id=$1 AND lower(email)=lower($2)', [tenant.id,identifier.trim()]);
+        if (result.rowCount && await passwordMatches(password,result.rows[0].password_hash)) matches.push({id:result.rows[0].id,slug:tenant.slug,title:tenant.title});
+        await db.query('COMMIT');
+      } catch(error) { await db.query('ROLLBACK').catch(()=>{}); throw error; }
+      finally { db.release(); }
+    }
+    if (!matches.length) return reply.code(401).send({ error: 'E-mail ou senha inválidos.' });
+    if (matches.length > 1) return reply.code(409).send({ error: 'Este e-mail acessa mais de um casamento. Escolha qual painel deseja abrir.', weddings: matches.map(({slug,title})=>({slug,title})) });
+    const match=matches[0];
+    reply.setCookie('admin_session', `admin:${match.id}`, { signed: true, httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'strict', path: '/', maxAge: 60 * 60 * 8 });
+    return { ok:true, wedding:{slug:match.slug,title:match.title} };
+  }
   const result = await req.db.query('SELECT id,password_hash FROM admin_users WHERE lower(username)=lower($1) OR lower(email)=lower($1) LIMIT 1', [identifier.trim()]);
   if (result.rowCount && await passwordMatches(password, result.rows[0].password_hash)) {
     reply.setCookie('admin_session', `admin:${result.rows[0].id}`, { signed: true, httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'strict', path: '/', maxAge: 60 * 60 * 8 });
-    return { ok: true };
+    return { ok: true, wedding:{slug:req.weddingSlug,title:req.weddingTitle} };
   }
   // Permite migrar sem interrupção: a senha administrativa atual segue aceitando login no campo de usuário/e-mail.
   const expected = process.env.ADMIN_PASSWORD;
@@ -255,9 +287,128 @@ app.post('/api/admin/login', { config: { rateLimit: { max: 5, timeWindow: '15 mi
   const legacyTenant = await req.db.query('SELECT wedding_id FROM legacy_admin_tenants WHERE singleton=true');
   if (!expected || !legacyTenant.rowCount || legacyTenant.rows[0].wedding_id !== req.weddingId || !timingSafeEqual(expectedHash, suppliedHash)) return reply.code(401).send({ error: 'Usuário/e-mail ou senha inválidos.' });
   reply.setCookie('admin_session', `admin:legacy:${req.weddingId}`, { signed: true, httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'strict', path: '/', maxAge: 60 * 60 * 8 });
-  return { ok: true };
+  return { ok: true, wedding:{slug:req.weddingSlug,title:req.weddingTitle} };
 });
 app.post('/api/admin/logout', { preHandler: requireAdmin }, async (req, reply) => { reply.clearCookie('admin_session', { path: '/' }); return { ok: true }; });
+app.get('/api/admin/payments', { preHandler: requireAdmin }, async req=>{
+  const [integration,payments]=await Promise.all([
+    req.db.query('SELECT environment,is_active,last_tested_at FROM payment_integrations WHERE wedding_id=$1',[req.weddingId]),
+    req.db.query('SELECT id,gift_id,sender_name,gift_title,amount,status,checkout_url,created_at,updated_at FROM gift_payments WHERE wedding_id=$1 ORDER BY created_at DESC LIMIT 100',[req.weddingId])
+  ]);
+  const configured=integration.rowCount>0, row=integration.rows[0];
+  const appUrl=paymentsWebhookBase(req);
+  return {configured,environment:row?.environment||'sandbox',isActive:Boolean(row?.is_active),lastTestedAt:row?.last_tested_at||null,webhookUrl:`${appUrl.replace(/\/$/,'')}/api/webhooks/asaas/${req.weddingId}`,payments:payments.rows.map(p=>({id:p.id,giftTitle:p.gift_title,senderName:p.sender_name,amount:Number(p.amount),status:p.status,checkoutUrl:p.checkout_url,createdAt:p.created_at,updatedAt:p.updated_at}))};
+});
+app.put('/api/admin/payments/config', { preHandler: requireAdmin }, async(req,reply)=>{
+  const {environment='sandbox',apiKey,rotateWebhookToken=false}=req.body||{};
+  if(!['sandbox','production'].includes(environment)||typeof rotateWebhookToken!=='boolean'||(apiKey!==undefined&&(!text(apiKey,300)||apiKey.trim().length<20)))return reply.code(400).send({error:'Informe um ambiente válido e uma chave API do Asaas.'});
+  if(apiKey&&!/^[a-f0-9]{64}$/i.test(process.env.PAYMENTS_ENCRYPTION_KEY||''))return reply.code(503).send({error:'O servidor ainda não tem PAYMENTS_ENCRYPTION_KEY configurada (64 caracteres hexadecimais).'});
+  const old=await req.db.query('SELECT environment,api_key_cipher,webhook_token_cipher FROM payment_integrations WHERE wedding_id=$1',[req.weddingId]);
+  if(!old.rowCount&&!apiKey)return reply.code(400).send({error:'Cole a chave API do Asaas para configurar este casamento.'});
+  if(old.rowCount&&old.rows[0].environment!==environment&&!apiKey)return reply.code(400).send({error:'Ao trocar o ambiente, informe a chave API correspondente.'});
+  const cipher=apiKey?encryptSecret(apiKey.trim()):old.rows[0].api_key_cipher;
+  let token=old.rowCount&&!rotateWebhookToken?decryptSecret(old.rows[0].webhook_token_cipher):null;
+  if(!token)token=randomBytes(32).toString('base64url');
+  await req.db.query(`INSERT INTO payment_integrations(wedding_id,environment,api_key_cipher,webhook_token_hash,webhook_token_cipher,is_active,last_tested_at,updated_at)
+    VALUES($1,$2,$3,$4,$5,false,NULL,now()) ON CONFLICT(wedding_id) DO UPDATE SET environment=EXCLUDED.environment,api_key_cipher=EXCLUDED.api_key_cipher,webhook_token_hash=EXCLUDED.webhook_token_hash,webhook_token_cipher=EXCLUDED.webhook_token_cipher,is_active=false,last_tested_at=NULL,updated_at=now()`,
+    [req.weddingId,environment,cipher,hashWebhookToken(token).toString('hex'),encryptSecret(token)]);
+  return {ok:true,configured:true,environment,webhookUrl:`${paymentsWebhookBase(req).replace(/\/$/,'')}/api/webhooks/asaas/${req.weddingId}`,webhookToken:token};
+});
+app.post('/api/admin/payments/test', { preHandler: requireAdmin }, async(req,reply)=>{
+  const result=await req.db.query('SELECT environment,api_key_cipher FROM payment_integrations WHERE wedding_id=$1',[req.weddingId]);
+  if(!result.rowCount)return reply.code(409).send({error:'Configure primeiro a conta Asaas deste casamento.'});
+  try{
+    const account=await asaasRequest(result.rows[0].environment,decryptSecret(result.rows[0].api_key_cipher),'/myAccount');
+    await req.db.query('UPDATE payment_integrations SET is_active=false,last_tested_at=now(),updated_at=now() WHERE wedding_id=$1',[req.weddingId]);
+    return {ok:true,account:{name:account.name||account.company||'Conta validada',email:account.email||''}};
+  }catch(error){req.log.warn({err:error,weddingId:req.weddingId},'Falha ao validar a conta Asaas');return reply.code(502).send({error:error.message.slice(0,350)});}
+});
+app.patch('/api/admin/payments/activation', { preHandler: requireAdmin }, async(req,reply)=>{
+  const {enabled,webhookConfigured}=req.body||{};
+  if(typeof enabled!=='boolean'||(enabled&&webhookConfigured!==true))return reply.code(400).send({error:'Confirme que o Webhook foi cadastrado e testado no Asaas antes de habilitar os pagamentos.'});
+  const result=await req.db.query('SELECT last_tested_at FROM payment_integrations WHERE wedding_id=$1',[req.weddingId]);
+  if(!result.rowCount||!result.rows[0].last_tested_at)return reply.code(409).send({error:'Teste primeiro a conexão com a conta Asaas.'});
+  await req.db.query('UPDATE payment_integrations SET is_active=$2,updated_at=now() WHERE wedding_id=$1',[req.weddingId,enabled]);
+  return {ok:true,isActive:enabled};
+});
+app.post('/api/payments/checkout', { config:{rateLimit:{max:5,timeWindow:'15 minutes'}} }, async(req,reply)=>{
+  const {giftId,senderName,whatsapp,email='',dedication=''}=req.body||{};
+  if(!text(giftId,40)||!text(senderName,120)||!phone(whatsapp)||typeof email!=='string'||email.length>254||(email&&!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))||typeof dedication!=='string'||dedication.length>1000)return reply.code(400).send({error:'Confira o presente, nome, WhatsApp e e-mail informado.'});
+  const config=await req.db.query('SELECT environment,api_key_cipher,is_active FROM payment_integrations WHERE wedding_id=$1',[req.weddingId]);
+  if(!config.rowCount||!config.rows[0].is_active)return reply.code(503).send({error:'O pagamento online ainda não está configurado para este casamento.'});
+  const giftResult=await req.db.query('SELECT id,title,price,is_gifted FROM gifts WHERE id=$1 FOR UPDATE',[giftId]);
+  if(!giftResult.rowCount)return reply.code(404).send({error:'Presente não encontrado.'});
+  const gift=giftResult.rows[0];
+  if(gift.is_gifted)return reply.code(409).send({error:'Este presente já foi pago. Escolha outro item.'});
+  if(Number(gift.price)<=0)return reply.code(400).send({error:'Este presente ainda não tem um valor para pagamento.'});
+  await req.db.query("UPDATE gift_payments SET status='EXPIRED',updated_at=now() WHERE wedding_id=$1 AND gift_id=$2 AND status IN ('CREATING','PENDING') AND expires_at<=now()",[req.weddingId,giftId]);
+  const active=await req.db.query("SELECT id FROM gift_payments WHERE wedding_id=$1 AND gift_id=$2 AND status IN ('CREATING','PENDING') LIMIT 1",[req.weddingId,giftId]);
+  if(active.rowCount)return reply.code(409).send({error:'Este presente já está reservado em um checkout em andamento. Tente novamente quando a reserva expirar.'});
+  const normalizedPhone=normalizeBrazilianPhone(whatsapp);
+  const guest=await req.db.query("SELECT id FROM guests WHERE lower(trim(name))=lower(trim($1)) AND regexp_replace(regexp_replace(whatsapp,'[^0-9]','','g'),'^55','')=$2 LIMIT 1",[senderName,normalizedPhone]);
+  if(!guest.rowCount)return reply.code(403).send({error:'O pagamento de presentes está disponível para quem confirmou presença. Confira nome e WhatsApp usados no RSVP.'});
+  const inserted=await req.db.query(`INSERT INTO gift_payments(wedding_id,gift_id,gift_title,guest_id,sender_name,whatsapp,dedication,amount,status,expires_at)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,'CREATING',now()+interval '65 minutes') RETURNING id`,[req.weddingId,giftId,gift.title,guest.rows[0].id,senderName.trim(),whatsapp.trim(),dedication.trim(),gift.price]);
+  const paymentId=inserted.rows[0].id;
+  const baseUrl=process.env.NODE_ENV==='production'&&process.env.APP_URL?process.env.APP_URL.replace(/\/$/,''):`${req.protocol}://${req.headers.host}`;
+  const callback=`${baseUrl}/casamento/${encodeURIComponent(req.weddingSlug)}?pagamento=`;
+  const payload={billingTypes:['PIX','CREDIT_CARD'],chargeTypes:['DETACHED'],minutesToExpire:60,externalReference:paymentId,callback:{successUrl:`${callback}sucesso#presentes`,cancelUrl:`${callback}cancelado#presentes`,expiredUrl:`${callback}expirado#presentes`},items:[{externalReference:gift.id,name:gift.title,description:`Presente de casamento para ${req.weddingTitle}`,quantity:1,value:Number(gift.price)}],customerData:{name:senderName.trim(),phone:normalizedPhone,...(email.trim()?{email:email.trim()}:{} )}};
+  try{
+    const apiKey=decryptSecret(config.rows[0].api_key_cipher),checkout=await asaasRequest(config.rows[0].environment,apiKey,'/checkouts',{method:'POST',body:payload});
+    const allowedHost=config.rows[0].environment==='sandbox'?'sandbox.asaas.com':'asaas.com';
+    const checkoutUrl=new URL(checkout.link);
+    if(checkoutUrl.protocol!=='https:'||checkoutUrl.hostname!==allowedHost)throw new Error('O Asaas retornou um endereço de checkout inesperado.');
+    await req.db.query("UPDATE gift_payments SET status='PENDING',checkout_id=$1,checkout_url=$2,updated_at=now() WHERE id=$3",[checkout.id,checkoutUrl.toString(),paymentId]);
+    return reply.code(201).send({paymentId,checkoutUrl:checkoutUrl.toString(),expiresAt:new Date(Date.now()+60*60*1000).toISOString()});
+  }catch(error){await req.db.query("UPDATE gift_payments SET status='FAILED',updated_at=now() WHERE id=$1",[paymentId]);req.log.warn({err:error,weddingId:req.weddingId,paymentId},'Não foi possível criar checkout no Asaas');return reply.code(502).send({error:error.message.slice(0,350)});}
+});
+app.post('/api/webhooks/asaas/:weddingId', { config:{rateLimit:{max:120,timeWindow:'1 minute'}} }, async(req,reply)=>{
+  const {weddingId}=req.params, payload=req.body||{}, eventId=payload.id,eventType=payload.event,checkout=payload.checkout;
+  if(!/^[0-9a-f-]{36}$/i.test(weddingId)||!text(eventId,255)||!text(eventType,100))return reply.code(400).send({error:'Evento inválido.'});
+  const tenant=await pool.query('SELECT id FROM weddings WHERE id=$1',[weddingId]);
+  if(!tenant.rowCount)return reply.code(404).send({error:'Casamento não encontrado.'});
+  const db=await pool.connect();
+  try{
+    await db.query('BEGIN');await db.query("SELECT set_config('app.wedding_id',$1,true)",[weddingId]);
+    const integration=await db.query('SELECT webhook_token_hash FROM payment_integrations WHERE wedding_id=$1',[weddingId]);
+    if(!integration.rowCount||!secureTokenMatches(req.headers['asaas-access-token'],integration.rows[0].webhook_token_hash)){await db.query('ROLLBACK');return reply.code(401).send({error:'Token de webhook inválido.'});}
+    const received=await db.query('INSERT INTO asaas_webhook_events(wedding_id,event_id,event_type) VALUES($1,$2,$3) ON CONFLICT DO NOTHING RETURNING event_id',[weddingId,eventId,eventType]);
+    if(!received.rowCount){await db.query('COMMIT');return {ok:true,duplicate:true};}
+    const settleGift=async payment=>{
+      const gift=await db.query('SELECT is_gifted FROM gifts WHERE id=$1 FOR UPDATE',[payment.gift_id]);
+      if(gift.rows[0]?.is_gifted){await db.query("UPDATE gift_payments SET status='PAID_DUPLICATE',updated_at=now() WHERE id=$1",[payment.id]);return}
+      await db.query("UPDATE gift_payments SET status='PAID',updated_at=now() WHERE id=$1",[payment.id]);
+      await db.query('UPDATE gifts SET is_gifted=true,gifted_by=$2 WHERE id=$1',[payment.gift_id,payment.sender_name]);
+      if(payment.dedication.trim())await db.query('INSERT INTO memories(gift_id,sender_name,whatsapp,gift_title,gift_amount,message,wedding_id) SELECT $1,$2,$3,g.title,g.price,$4,$5 FROM gifts g WHERE g.id=$1 ON CONFLICT DO NOTHING',[payment.gift_id,payment.sender_name,payment.whatsapp,payment.dedication,weddingId]);
+    };
+    if(['CHECKOUT_PAID','CHECKOUT_CANCELED','CHECKOUT_EXPIRED'].includes(eventType)&&text(checkout?.id,80)){
+      const paymentResult=await db.query("SELECT id,gift_id,sender_name,dedication,status FROM gift_payments WHERE wedding_id=$1 AND checkout_id=$2 FOR UPDATE",[weddingId,checkout.id]);
+      if(paymentResult.rowCount){
+        const payment=paymentResult.rows[0];
+        if(eventType==='CHECKOUT_PAID'&&!['PAID','PAID_DUPLICATE','REFUND_PENDING','PARTIAL_REFUND','REFUNDED','CHARGEBACK'].includes(payment.status)){
+          const fullPayment=await db.query('SELECT id,gift_id,sender_name,whatsapp,dedication FROM gift_payments WHERE id=$1',[payment.id]);
+          await settleGift(fullPayment.rows[0]);
+        }else if(eventType==='CHECKOUT_CANCELED')await db.query("UPDATE gift_payments SET status='CANCELED',updated_at=now() WHERE id=$1 AND status IN ('CREATING','PENDING')",[payment.id]);
+        else if(eventType==='CHECKOUT_EXPIRED')await db.query("UPDATE gift_payments SET status='EXPIRED',updated_at=now() WHERE id=$1 AND status IN ('CREATING','PENDING')",[payment.id]);
+      }
+    }
+    const paymentId=payload.payment?.externalReference;
+    if(/^[0-9a-f-]{36}$/i.test(paymentId||'')){
+      const local=await db.query('SELECT id,gift_id,sender_name,whatsapp,dedication,status FROM gift_payments WHERE wedding_id=$1 AND id=$2 FOR UPDATE',[weddingId,paymentId]);
+      if(local.rowCount){
+        const payment=local.rows[0];
+        if(eventType==='PAYMENT_RECEIVED'&&['CREATING','PENDING','EXPIRED','CANCELED'].includes(payment.status))await settleGift(payment);
+        else if(eventType==='PAYMENT_RECEIVED'&&payment.status==='CHARGEBACK')await db.query("UPDATE gift_payments SET status='PAID',updated_at=now() WHERE id=$1",[payment.id]);
+        const mapped={PAYMENT_REFUND_IN_PROGRESS:'REFUND_PENDING',PAYMENT_PARTIALLY_REFUNDED:'PARTIAL_REFUND',PAYMENT_REFUNDED:'REFUNDED',PAYMENT_REFUND_DENIED:'PAID',PAYMENT_CHARGEBACK_REQUESTED:'CHARGEBACK',PAYMENT_CHARGEBACK_DISPUTE:'CHARGEBACK',PAYMENT_AWAITING_CHARGEBACK_REVERSAL:'CHARGEBACK'}[eventType];
+        if(mapped){
+          await db.query('UPDATE gift_payments SET status=$2,updated_at=now() WHERE id=$1',[payment.id,mapped]);
+          if(mapped==='REFUNDED')await db.query("UPDATE gifts SET is_gifted=false,gifted_by=NULL WHERE id=$1 AND NOT EXISTS (SELECT 1 FROM gift_payments WHERE gift_id=$1 AND wedding_id=$2 AND id<>$3 AND status IN ('PAID','PAID_DUPLICATE','CHARGEBACK'))",[payment.gift_id,weddingId,payment.id]);
+        }
+      }
+    }
+    await db.query('COMMIT');return {ok:true};
+  }catch(error){await db.query('ROLLBACK').catch(()=>{});throw error;}finally{db.release();}
+});
 app.get('/api/admin/data', { preHandler: requireAdmin }, async (req) => {
   const [memories, guests, suppliers, gifts, settings] = await Promise.all([req.db.query('SELECT * FROM memories ORDER BY created_at DESC'), req.db.query('SELECT * FROM guests ORDER BY created_at DESC'), req.db.query('SELECT * FROM suppliers ORDER BY name'),req.db.query('SELECT * FROM gifts ORDER BY category,title'),req.db.query("SELECT key,value FROM site_settings WHERE key IN ('venue_ceremony','venue_reception','story_content','event_schedule','design_theme') ORDER BY key")]);
   const values=Object.fromEntries(settings.rows.map(r=>[r.key,r.value]));
@@ -330,15 +481,18 @@ app.patch('/api/admin/gifts/:giftId', { preHandler: requireAdmin }, async (req,r
   if(description!==undefined){if(!text(description,1000))return reply.code(400).send({error:'Descrição inválida.'});entries.push(['description',description.trim()])}
   if(price!==undefined){if(!money(price))return reply.code(400).send({error:'Valor inválido.'});entries.push(['price',Number(price)])}
   if(!entries.length)return reply.code(400).send({error:'Informe ao menos um campo para atualizar.'});
+  const locked=await req.db.query('SELECT id FROM gifts WHERE id=$1 FOR UPDATE',[req.params.giftId]);if(!locked.rowCount)return reply.code(404).send({error:'Presente não encontrado.'});
+  if(entries.some(([key])=>['title','price'].includes(key))){const pending=await req.db.query("SELECT 1 FROM gift_payments WHERE wedding_id=$1 AND gift_id=$2 AND status IN ('CREATING','PENDING') LIMIT 1",[req.weddingId,req.params.giftId]);if(pending.rowCount)return reply.code(409).send({error:'Nome e valor não podem mudar enquanto há um checkout em andamento para este presente.'})}
   const setters=entries.map(([key],i)=>`${key}=$${i+1}`),result=await req.db.query(`UPDATE gifts SET ${setters.join(',')} WHERE id=$${entries.length+1} RETURNING id`,[...entries.map(([,value])=>value),req.params.giftId]);
   return result.rowCount?{ok:true}:reply.code(404).send({error:'Presente não encontrado.'});
 });
 app.delete('/api/admin/gifts/:giftId', { preHandler: requireAdmin }, async (req,reply)=>{
   const db=req.db;let imageKey;
   try{
-    const gift=await db.query('SELECT image_key,is_gifted FROM gifts WHERE id=$1 FOR UPDATE',[req.params.giftId]);
+    const gift=await db.query('SELECT image_key,is_gifted,(SELECT count(*)::int FROM gift_payments p WHERE p.wedding_id=$2 AND p.gift_id=gifts.id) AS payment_count FROM gifts WHERE id=$1 FOR UPDATE',[req.params.giftId,req.weddingId]);
     if(!gift.rowCount)return reply.code(404).send({error:'Presente não encontrado.'})
     if(gift.rows[0].is_gifted)return reply.code(409).send({error:'Este presente já foi confirmado e não pode ser removido da lista.'})
+    if(gift.rows[0].payment_count)return reply.code(409).send({error:'Este presente tem histórico de checkout e não pode ser removido. Mantenha-o na lista para preservar a auditoria dos pagamentos.'})
     imageKey=gift.rows[0].image_key;await db.query('DELETE FROM gifts WHERE id=$1',[req.params.giftId]);
   }catch(error){throw error}
   if(imageKey)await deleteImage(imageKey).catch(error=>req.log.warn({err:error},'A imagem do presente permaneceu no armazenamento.'));
@@ -411,6 +565,7 @@ app.patch('/api/admin/:kind/:id', { preHandler: requireAdmin }, async (req, repl
 app.delete('/api/admin/:kind/:id', { preHandler: requireAdmin }, async (req, reply) => {
   const tables={memories:'memories',guests:'guests',suppliers:'suppliers'}; const table=tables[req.params.kind];
   if(!table) return reply.code(404).send({error:'Registro não encontrado.'});
+  if(req.params.kind==='guests'){const payments=await req.db.query('SELECT 1 FROM gift_payments WHERE wedding_id=$1 AND guest_id=$2 LIMIT 1',[req.weddingId,req.params.id]);if(payments.rowCount)return reply.code(409).send({error:'Este convidado possui histórico de pagamento e não pode ser removido.'})}
   const result=await req.db.query(`DELETE FROM ${table} WHERE id=$1`,[req.params.id]);
   return result.rowCount ? {ok:true} : reply.code(404).send({error:'Registro não encontrado.'});
 });
