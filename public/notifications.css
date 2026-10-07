@@ -1,10 +1,28 @@
-#toast {
+#toast-dialog {
   position: fixed;
   z-index: 1000;
   top: max(16px, env(safe-area-inset-top));
   left: max(16px, env(safe-area-inset-left));
+  right: auto;
   bottom: auto;
   width: min(420px, calc(100vw - 32px));
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  overflow: visible;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  box-shadow: none;
+}
+
+#toast-dialog::backdrop { background: transparent; }
+
+#toast {
+  position: relative;
+  inset: auto;
+  width: 100%;
   min-height: 52px;
   display: flex;
   align-items: center;

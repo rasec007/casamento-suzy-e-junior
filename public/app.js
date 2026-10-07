@@ -29,7 +29,7 @@ async function api(path, options={}) {
   if(!response.ok) throw new Error(payload.error||'Não foi possível concluir a solicitação.');
   return payload;
 }
-function notify(message,type='success'){const toast=$('#toast');toast.textContent=message;toast.dataset.type=type;toast.classList.add('show');clearTimeout(notify.timer);notify.timer=setTimeout(()=>toast.classList.remove('show'),5000)}
+function notify(message,type='success'){window.showToast?.(message,type)}
 function renderVenues(){
   $('#venues').innerHTML=state.venues.map(venue=>{const eyebrow=venue.id==='ceremony'&&state.event?venue.eyebrow.replace(/\d{2}H\d{2}/,state.event.eventTime.replace(':','H')):venue.eyebrow;return `<article class="venue"><p class="eyebrow">${esc(eyebrow)}</p><h3>${esc(venue.title)}</h3><p class="venue-name">${esc(venue.name)}</p><p>${esc(venue.address)}</p>${venue.imageUrl?`<div class="venue-photo"><img loading="lazy" src="${esc(venue.imageUrl)}" alt="${esc(venue.imageAlt)}"></div>`:''}<a class="outline block" target="_blank" rel="noopener noreferrer" href="${esc(venue.mapsUrl)}">Abrir rota no Google Maps ↗</a></article>`}).join('');
 }
