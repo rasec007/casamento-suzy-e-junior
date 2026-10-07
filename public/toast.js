@@ -1,5 +1,5 @@
 (() => {
-  const layer = document.querySelector('#toast-dialog');
+  const layer = document.querySelector('#toast-layer');
   const toast = document.querySelector('#toast');
   if (!layer || !toast) return;
 
@@ -10,11 +10,11 @@
     toast.textContent = text;
     toast.dataset.type = type;
     toast.classList.add('show');
-    if (!layer.open) layer.show();
+    if (!layer.matches(':popover-open')) layer.showPopover();
     clearTimeout(timer);
     timer = setTimeout(() => {
       toast.classList.remove('show');
-      if (layer.open) layer.close();
+      if (layer.matches(':popover-open')) layer.hidePopover();
     }, 5000);
   };
 
@@ -33,7 +33,7 @@
       record.addedNodes?.forEach(node => { if (node.nodeType === Node.ELEMENT_NODE) addIfStatus(node); });
     }
     for (const element of candidates) {
-      if (element.closest('#toast-dialog')) continue;
+      if (element.closest('#toast-layer')) continue;
       const message = element.textContent.trim();
       if (!message) { notified.delete(element); continue; }
       if (notified.get(element) === message) continue;

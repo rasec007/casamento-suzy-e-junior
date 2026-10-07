@@ -6,8 +6,8 @@
   <meta name="robots" content="noindex, nofollow">
   <title>Casamento não encontrado</title>
   <link rel="stylesheet" href="/not-found.css">
-  <link rel="stylesheet" href="/notifications.css">
-  <script src="/toast.js" defer></script>
+  <link rel="stylesheet" href="/notifications.css?v=toast-popover-20261007">
+  <script src="/toast.js?v=toast-popover-20261007" defer></script>
   <script src="/not-found.js" defer></script>
 </head>
 <body>
@@ -35,6 +35,6 @@
       <p id="login-status" role="status" aria-live="polite"></p>
     </form>
   </main>
-  <dialog id="toast-dialog" aria-label="Notificações"><div id="toast" role="status" aria-live="polite"></div></dialog>
+  <div id="toast-layer" popover="manual"><div id="toast" role="status" aria-live="polite"></div></div>
 </body>
 </html>

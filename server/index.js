@@ -92,7 +92,9 @@ app.addHook('preHandler', async (request, reply) => {
   catch(error) { request.db.release(); request.db=null; throw error; }
 });
 app.addHook('onError', async request => { if(request.db&&!request.dbReleased){await request.db.query('ROLLBACK').catch(()=>{});request.db.release();request.dbReleased=true;} });
-app.addHook('onSend', async (request, _reply, payload) => {
+app.addHook('onSend', async (request, reply, payload) => {
+  const pathname = new URL(request.raw.url || '/', 'http://local').pathname;
+  if (/\.(?:html|js|css)$/i.test(pathname) || pathname === '/' || pathname.startsWith('/casamento/')) reply.header('cache-control', 'no-cache, must-revalidate');
   if(request.db&&!request.dbReleased){await request.db.query('COMMIT');request.db.release();request.dbReleased=true;}
   return payload;
 });
@@ -603,7 +605,7 @@ app.get('/api/events', async (req, reply) => {
   const res=reply.raw; res.writeHead(200,{'content-type':'text/event-stream','cache-control':'no-cache, no-transform','connection':'keep-alive','x-accel-buffering':'no'}); res.write('event: ready\ndata: {}\n\n');
   const send=msg=>{let payload;try{payload=JSON.parse(msg.payload)}catch{return}if(payload.weddingId===weddingId&&!res.destroyed)res.write(`event: update\ndata: ${JSON.stringify({at:Date.now()})}\n\n`)};
   const heartbeat=setInterval(()=>{if(!res.destroyed)res.write(': keep-alive\n\n');},25_000); live.on('notification',send);
-  req.raw.on('close',()=>{clearInterval(heartbeat);live.off('notification',send);});
+  res.on('close',()=>{clearInterval(heartbeat);live.off('notification',send);});
 });
 app.setNotFoundHandler((req,reply)=> req.url.startsWith('/api/') ? reply.code(404).send({error:'Rota não encontrada.'}) : reply.sendFile('index.html'));
 app.setErrorHandler((error,req,reply)=>{ req.log.error(error); const code=error.statusCode||(['23514','22P02'].includes(error.code)?400:500); reply.code(code).send({error:code<500?(error.statusCode?error.message:'Dados inválidos.'):'Erro interno.'}); });

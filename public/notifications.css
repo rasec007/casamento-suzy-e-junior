@@ -1,6 +1,6 @@
-#toast-dialog {
+#toast-layer {
   position: fixed;
-  z-index: 1000;
+  z-index: 2147483647;
   top: max(16px, env(safe-area-inset-top));
   left: max(16px, env(safe-area-inset-left));
   right: auto;
@@ -16,8 +16,6 @@
   color: inherit;
   box-shadow: none;
 }
-
-#toast-dialog::backdrop { background: transparent; }
 
 #toast {
   position: relative;
