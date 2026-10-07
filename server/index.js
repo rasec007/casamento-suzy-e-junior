@@ -257,6 +257,7 @@ app.post('/api/admin/login', { config: { rateLimit: { max: 8, timeWindow: '15 mi
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(identifier.trim())) return reply.code(401).send({ error: 'Usuário/e-mail ou senha inválidos.' });
     const tenants = await pool.query('SELECT id,slug,title FROM weddings ORDER BY created_at');
     const matches = [];
+    const legacyMatches = [];
     for (const tenant of tenants.rows) {
       const db = await pool.connect();
       try {
@@ -264,12 +265,24 @@ app.post('/api/admin/login', { config: { rateLimit: { max: 8, timeWindow: '15 mi
         await db.query("SELECT set_config('app.wedding_id',$1,true)", [tenant.id]);
         const result = await db.query('SELECT id,password_hash FROM admin_users WHERE wedding_id=$1 AND lower(email)=lower($2)', [tenant.id,identifier.trim()]);
         if (result.rowCount && await passwordMatches(password,result.rows[0].password_hash)) matches.push({id:result.rows[0].id,slug:tenant.slug,title:tenant.title});
+        const legacy = await db.query('SELECT 1 FROM legacy_admin_tenants WHERE singleton=true AND wedding_id=$1', [tenant.id]);
+        const expected = process.env.ADMIN_PASSWORD;
+        const expectedHash = createHash('sha256').update(expected || '').digest();
+        const suppliedHash = createHash('sha256').update(password).digest();
+        const configuredEmail = process.env.ADMIN_EMAIL;
+        if (legacy.rowCount && expected && timingSafeEqual(expectedHash,suppliedHash) && (!configuredEmail || configuredEmail.trim().toLowerCase()===identifier.trim().toLowerCase())) legacyMatches.push({id:tenant.id,slug:tenant.slug,title:tenant.title});
         await db.query('COMMIT');
       } catch(error) { await db.query('ROLLBACK').catch(()=>{}); throw error; }
       finally { db.release(); }
     }
-    if (!matches.length) return reply.code(401).send({ error: 'E-mail ou senha inválidos.' });
+    if (!matches.length && !legacyMatches.length) return reply.code(401).send({ error: 'E-mail ou senha inválidos.' });
     if (matches.length > 1) return reply.code(409).send({ error: 'Este e-mail acessa mais de um casamento. Escolha qual painel deseja abrir.', weddings: matches.map(({slug,title})=>({slug,title})) });
+    if (legacyMatches.length === 1 && !matches.length) {
+      const match=legacyMatches[0];
+      reply.setCookie('admin_session', `admin:legacy:${match.id}`, { signed: true, httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'strict', path: '/', maxAge: 60 * 60 * 8 });
+      return { ok:true, wedding:{slug:match.slug,title:match.title} };
+    }
+    if (legacyMatches.length > 1) return reply.code(409).send({ error: 'Este acesso corresponde a mais de um casamento. Informe a URL completa do site e tente novamente.' });
     const match=matches[0];
     reply.setCookie('admin_session', `admin:${match.id}`, { signed: true, httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'strict', path: '/', maxAge: 60 * 60 * 8 });
     return { ok:true, wedding:{slug:match.slug,title:match.title} };
