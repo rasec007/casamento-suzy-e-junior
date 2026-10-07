@@ -21,3 +21,23 @@
 .rsvp-meaning{margin:-14px 0 20px;color:var(--gold);font:italic 15px/1.7 var(--display);letter-spacing:.02em}.rsvp-meaning i{font-style:italic}
 
 .mirror-incantation{text-align:center;width:100%;letter-spacing:.16em}
+
+/* Variáveis aplicadas pelos temas escolhidos no painel dos noivos */
+.hero{background-color:var(--bg);background-image:var(--hero-image,url('/images/hero_wedding_hall_1791245517448.jpg'))}
+.topbar,.topbar nav.open,.admin-header,.admin-nav{background-color:color-mix(in srgb,var(--bg) 94%,transparent)}
+.locations,.gift-card,.memory-card,.guest-card,.venue,.rsvp-box,.admin,.admin-venue,.admin-story,.admin-gift,.manuscript,.countdown>div{background-color:var(--panel)}
+.gold-button{background:var(--button-bg,var(--gold));border-color:var(--button-bg,var(--gold));color:var(--button-fg,var(--bg))}
+.gold-button:hover{background:var(--button-hover,#d4b475);border-color:var(--button-hover,#d4b475);color:var(--button-fg,var(--bg))}
+.outline:hover{background:var(--button-bg,var(--gold));border-color:var(--button-bg,var(--gold));color:var(--button-fg,var(--bg))}
+.theme-presets{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin:8px 0 12px}
+.theme-presets button{display:grid;gap:6px;justify-items:start;padding:12px;border:1px solid color-mix(in srgb,var(--gold) 38%,transparent);background:var(--panel);color:var(--text);text-align:left}
+.theme-presets button.active{border-color:var(--gold);box-shadow:0 0 0 1px var(--gold)}
+.theme-presets span{display:flex;gap:5px}.theme-presets i{width:18px;height:18px;border:1px solid #ffffff45;border-radius:50%}.palette-color-dourado-classico-0{background:#0a0d14}.palette-color-dourado-classico-1{background:#101520}.palette-color-dourado-classico-2{background:#c0a062}.palette-color-dourado-classico-3{background:#c0a062}.palette-color-azul-mar-profundo-0{background:#09131c}.palette-color-azul-mar-profundo-1{background:#102433}.palette-color-azul-mar-profundo-2{background:#78b8c7}.palette-color-azul-mar-profundo-3{background:#4f9daf}.palette-color-verde-esperanca-0{background:#0b1510}.palette-color-verde-esperanca-1{background:#17251c}.palette-color-verde-esperanca-2{background:#91b68a}.palette-color-verde-esperanca-3{background:#628b68}.palette-color-vermelho-apaixonado-0{background:#180e12}.palette-color-vermelho-apaixonado-1{background:#29171d}.palette-color-vermelho-apaixonado-2{background:#d3919b}.palette-color-vermelho-apaixonado-3{background:#a84759}.palette-color-lavanda-serena-0{background:#14111b}.palette-color-lavanda-serena-1{background:#211b2c}.palette-color-lavanda-serena-2{background:#c0a6d7}.palette-color-lavanda-serena-3{background:#9172b0}
+.theme-color-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.theme-color-grid label{display:flex;flex-direction:column;gap:6px;color:#ddd;font:11px var(--serif)}
+.theme-color-grid input[type=color]{width:100%;height:42px;padding:3px;border:1px solid #c0a06250;background:var(--bg);cursor:pointer}
+.theme-font-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.theme-font-grid label{display:flex;flex-direction:column;gap:6px;color:#ddd;font:11px var(--serif)}
+.theme-font-grid select{width:100%;padding:11px;border:1px solid #c0a06250;background:var(--bg);color:var(--text)}
+.theme-hero-preview{height:180px;overflow:hidden;border:1px solid #c0a06250;background-image:var(--hero-image);background-position:center;background-size:cover}
+@media(max-width:600px){.theme-font-grid{grid-template-columns:1fr}}

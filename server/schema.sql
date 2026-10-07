@@ -4,7 +4,12 @@ CREATE TABLE IF NOT EXISTS weddings (
   title varchar(180) NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now()
 );
-INSERT INTO weddings(slug,title) VALUES('suzy-e-junior','Suzy & Junior') ON CONFLICT(slug) DO NOTHING;
+CREATE TABLE IF NOT EXISTS legacy_admin_tenants (
+  singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+  wedding_id uuid NOT NULL REFERENCES weddings(id) ON DELETE CASCADE
+);
+INSERT INTO weddings(slug,title) SELECT 'suzy-e-junior','Suzy & Junior' WHERE NOT EXISTS (SELECT 1 FROM legacy_admin_tenants) AND NOT EXISTS (SELECT 1 FROM weddings WHERE slug='suzy-e-junior') ON CONFLICT(slug) DO NOTHING;
+INSERT INTO legacy_admin_tenants(singleton,wedding_id) SELECT true,id FROM weddings WHERE slug='suzy-e-junior' ON CONFLICT(singleton) DO NOTHING;
 CREATE TABLE IF NOT EXISTS gifts (
   id text PRIMARY KEY, title text NOT NULL, category text NOT NULL,
   price numeric(10,2) NOT NULL CHECK (price >= 0), description text NOT NULL
@@ -67,12 +72,13 @@ DO $$ DECLARE tbl text; BEGIN
 END $$;
 ALTER TABLE site_settings DROP CONSTRAINT IF EXISTS site_settings_pkey;
 ALTER TABLE site_settings ADD CONSTRAINT site_settings_pkey PRIMARY KEY (wedding_id,key);
-SELECT set_config('app.wedding_id',(SELECT id::text FROM weddings WHERE slug='suzy-e-junior'),true);
+SELECT set_config('app.wedding_id',(SELECT wedding_id::text FROM legacy_admin_tenants WHERE singleton=true),true);
 INSERT INTO site_settings(wedding_id,key,value) SELECT w.id,v.key,v.value::jsonb FROM weddings w CROSS JOIN (VALUES
 ('venue_ceremony', '{"id":"ceremony","title":"Cerimônia Religiosa","eyebrow":"SACRAMENTO MATRIMONIAL • 10H00","name":"Paróquia N. Sra. da Glória","address":"Av. Oliveira Paiva, 905 — Cidade dos Funcionários, Fortaleza / CE","mapsUrl":"https://www.google.com/maps/search/?api=1&query=Paroquia+Nossa+Senhora+da+Gloria+Fortaleza","imageUrl":"/images/venue_ceremony_church_1791245531975.jpg","imageAlt":"Interior da Paróquia Nossa Senhora da Glória"}'),
 ('venue_reception', '{"id":"reception","title":"Recepção aos Convidados","eyebrow":"BRINDE & BANQUETE • 12H00","name":"Asttore Forneria","address":"Rua Ana Bilhar, 987 — Meireles / Varjota, Fortaleza / CE","mapsUrl":"https://www.google.com/maps/search/?api=1&query=Asttore+Forneria+Fortaleza","imageUrl":"/images/venue_reception_forneria_1791245541370.jpg","imageAlt":"Salão da recepção na Asttore Forneria"}'),
 ('story_content', '{"eyebrow":"01. DO JARDIM DE INFÂNCIA AO ALTAR","title":"Nossa História","body":"Nossa história não começou há dez anos, mas sim quando tínhamos apenas 5 anos de idade, no Jardim de Infância da Escola Centro Acadêmico. O tempo cuidou de guardar nosso reencontro até que estivéssemos prontos para caminhar lado a lado. Já são 10 anos juntos, 1 filho de 7 anos, 1 cachorro, 1 gato, 2 peixes, 2 periquitos, 2 empréstimos, 1 terreno e infinitos sonhos. No dia 18/03/2027, daremos o passo mais bonito da nossa caminhada.","facts":["10 anos juntos","1 filho de 7 anos","1 cachorro & 1 gato","2 peixes & 2 periquitos","2 empréstimos & 1 terreno"],"question":"Depois de todo esse tempo?","answer":"Sempre!"}'),
-('event_schedule', '{"eventDate":"2027-03-18","eventTime":"10:00","rsvpDeadline":"2027-02-18"}')
+('event_schedule', '{"eventDate":"2027-03-18","eventTime":"10:00","rsvpDeadline":"2027-02-18"}'),
+('design_theme', '{"preset":"dourado-classico","colors":{"background":"#0a0d14","panel":"#101520","text":"#ebebeb","accent":"#c0a062","button":"#c0a062","buttonHover":"#d4b475","buttonText":"#0a0d14"},"fonts":{"heading":"Cinzel","body":"Montserrat"},"heroImage":"/images/hero_wedding_hall_1791245517448.jpg","heroImageKey":""}')
 ) AS v(key,value) WHERE w.slug='suzy-e-junior' ON CONFLICT(wedding_id,key) DO NOTHING;
 DO $$ DECLARE tbl text; BEGIN
   FOREACH tbl IN ARRAY ARRAY['gifts','memories','guests','suppliers','site_settings','admin_users'] LOOP

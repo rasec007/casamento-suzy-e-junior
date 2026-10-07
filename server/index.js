@@ -17,7 +17,6 @@ import { isStorageConfigured, ensureBucket, putImage, getImage, deleteImage, clo
 
 const root = dirname(fileURLToPath(import.meta.url));
 const scrypt = promisify(scryptCallback);
-const defaultWeddingSlug = process.env.DEFAULT_WEDDING_SLUG || 'suzy-e-junior';
 const app = Fastify({ logger: { redact: ['req.headers.cookie', 'req.headers.authorization'] }, trustProxy: process.env.TRUST_PROXY === 'true', bodyLimit: 16_384, requestTimeout: 15_000 });
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 12, connectionTimeoutMillis: 5000, idleTimeoutMillis: 30_000, application_name: 'suzy-junior-wedding' });
 const live = new pg.Client({ connectionString: process.env.DATABASE_URL, application_name: 'suzy-junior-realtime' });
@@ -29,9 +28,15 @@ await app.register(multipart, { limits: { fileSize: 5 * 1024 * 1024, files: 1, f
 await app.register(fastifyStatic, { root: join(root, '../public'), prefix: '/', maxAge: process.env.NODE_ENV === 'production' ? '1h' : 0, immutable: false, wildcard: false });
 
 app.addHook('onRequest', async (request, reply) => {
-  if (request.url.split('?')[0] !== '/' || !['GET', 'HEAD'].includes(request.method)) return;
-  const slug = /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(defaultWeddingSlug) ? defaultWeddingSlug : 'slug-do-casamento';
-  reply.code(404).type('text/html; charset=utf-8').send(`<!doctype html><html lang="pt-BR"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Endereço incompleto | Casamento</title><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;background:#0a0d14;color:#ebebeb;font:16px/1.7 system-ui,sans-serif;text-align:center}.card{max-width:620px;padding:clamp(28px,7vw,56px);border:1px solid #c0a06270;background:#101520}h1{color:#c0a062;font:400 clamp(28px,6vw,42px)/1.2 Georgia,serif}p{color:#ccc}a{display:inline-block;margin-top:14px;padding:12px 18px;border:1px solid #c0a062;color:#c0a062;text-decoration:none}code{color:#ebebeb}</style><main class="card"><p>ENDEREÇO INCOMPLETO</p><h1>Esta URL está incorreta</h1><p>Falta o slug que identifica o casamento. O endereço do site deve incluir <code>/casamento/slug-do-casamento</code>.</p><p>Para Suzy &amp; Junior, acesse o endereço correto:</p><a href="/casamento/${slug}">Abrir o site de Suzy &amp; Junior</a></main></html>`);
+  if (!['GET', 'HEAD'].includes(request.method)) return;
+  const pathname = new URL(request.url, 'http://local').pathname;
+  if (pathname.startsWith('/api/') || pathname.startsWith('/media/') || pathname.startsWith('/images/') || /\.(?:css|js|ico|png|jpe?g|webp|svg|woff2?)$/i.test(pathname)) return;
+  const match = pathname.match(/^\/casamento\/([a-z0-9]+(?:-[a-z0-9]+)*)\/?$/);
+  if (match) {
+    const found = await pool.query('SELECT 1 FROM weddings WHERE slug=$1', [match[1]]);
+    if (found.rowCount) return;
+  }
+  return reply.code(404).header('cache-control', 'no-store').sendFile('not-found.html');
 });
 
 async function requireAdmin(request, reply) {
@@ -39,10 +44,15 @@ async function requireAdmin(request, reply) {
   const session = request.unsignCookie(request.cookies.admin_session || '');
   if (!session.valid || !session.value?.startsWith('admin:')) return reply.code(401).send({ error: 'Acesso administrativo necessário.' });
   const userId = session.value.slice(6);
-  if (userId !== 'legacy') {
+  if (userId.startsWith('legacy:')) {
+    if (userId.slice(7) !== request.weddingId) return reply.code(401).send({ error: 'Acesso administrativo necessário.' });
+  } else if (userId === 'legacy') {
+    const legacyTenant = await request.db.query('SELECT 1 FROM legacy_admin_tenants WHERE singleton=true AND wedding_id=$1', [request.weddingId]);
+    if (!legacyTenant.rowCount) return reply.code(401).send({ error: 'Acesso administrativo necessário.' });
+  } else {
     const user = await request.db.query('SELECT id FROM admin_users WHERE id=$1', [userId]);
     if (!user.rowCount) return reply.code(401).send({ error: 'Acesso administrativo necessário.' });
-  } else if (request.weddingSlug !== defaultWeddingSlug) return reply.code(401).send({ error: 'Acesso administrativo necessário.' });
+  }
   request.adminUserId = userId;
 }
 const passwordHash = async password => {
@@ -70,7 +80,7 @@ app.addHook('preHandler', sameOrigin);
 app.addHook('preHandler', async (request, reply) => {
   if (!request.url.startsWith('/api/') || request.url.startsWith('/api/health') || request.url.startsWith('/api/admin/register') || request.url.startsWith('/api/events')) return;
   const requestedSlug = request.headers['x-wedding-slug'] || new URL(request.url, 'http://local').searchParams.get('wedding');
-  if (!requestedSlug) return reply.code(400).send({error:'URL incompleta: informe o slug do casamento, por exemplo /casamento/suzy-e-junior.'});
+  if (!requestedSlug) return reply.code(400).send({error:'URL incompleta: informe o slug do casamento, por exemplo /casamento/nome-do-casal.'});
   if (typeof requestedSlug !== 'string' || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(requestedSlug)) return reply.code(400).send({error:'Slug de casamento inválido.'});
   const found = await pool.query('SELECT id,title FROM weddings WHERE slug=$1', [requestedSlug]);
   if (!found.rowCount) return reply.code(404).send({error:'Casamento não encontrado.'});
@@ -110,7 +120,8 @@ async function seed() {
   try {
     await db.query('BEGIN');
     await db.query("SELECT pg_advisory_xact_lock(hashtext('suzy-junior-wedding-seed'))");
-    const wedding=await db.query('SELECT id FROM weddings WHERE slug=$1',[defaultWeddingSlug]);
+    const wedding=await db.query('SELECT wedding_id AS id FROM legacy_admin_tenants WHERE singleton=true');
+    if(!wedding.rowCount)throw new Error('O casamento base do sistema não foi inicializado.');
     await db.query("SELECT set_config('app.wedding_id',$1,true)",[wedding.rows[0].id]);
     const existing = await db.query('SELECT count(*)::int AS count FROM gifts');
     if (existing.rows[0].count) { await db.query('COMMIT'); return; }
@@ -132,14 +143,23 @@ app.get('/api/site', async (req) => {
     req.db.query('SELECT * FROM gifts ORDER BY id'),
     req.db.query(`SELECT ${publicMemoryFields} FROM memories WHERE is_visible ORDER BY created_at DESC LIMIT 100`),
     req.db.query(`SELECT ${publicGuestFields} FROM guests WHERE is_visible ORDER BY created_at DESC LIMIT 250`),
-    req.db.query("SELECT key,value FROM site_settings WHERE key IN ('venue_ceremony','venue_reception','story_content','event_schedule') ORDER BY key")
+    req.db.query("SELECT key,value FROM site_settings WHERE key IN ('venue_ceremony','venue_reception','story_content','event_schedule','design_theme') ORDER BY key")
   ]);
   const settings=Object.fromEntries(venues.rows.map(r=>[r.key,r.value]));
-  return { wedding:{slug:req.weddingSlug,title:req.weddingTitle}, gifts: gifts.rows.map(giftOut), memories: memories.rows.map(memoryOut), guests: guests.rows.map(guestOut), venues: ['venue_ceremony','venue_reception'].map(k=>settings[k]).filter(Boolean), story:settings.story_content||null, event:settings.event_schedule||null };
+  return { wedding:{slug:req.weddingSlug,title:req.weddingTitle}, gifts: gifts.rows.map(giftOut), memories: memories.rows.map(memoryOut), guests: guests.rows.map(guestOut), venues: ['venue_ceremony','venue_reception'].map(k=>settings[k]).filter(Boolean), story:settings.story_content||null, event:settings.event_schedule||null, design:settings.design_theme||null };
+});
+app.get('/api/theme.css', async(req,reply)=>{
+  const result=await req.db.query("SELECT value FROM site_settings WHERE key='design_theme'");
+  const design=result.rows[0]?.value||{},colors=design.colors||{},fonts=design.fonts||{};
+  const pickColor=(key,fallback)=>validColor(colors[key])?colors[key]:fallback;
+  const heading=themeFonts.heading.has(fonts.heading)?fonts.heading:'Cinzel',body=themeFonts.body.has(fonts.body)?fonts.body:'Montserrat';
+  const hero=validHeroImage(design.heroImage)?design.heroImage:'/images/hero_wedding_hall_1791245517448.jpg';
+  const css=`:root{--bg:${pickColor('background','#0a0d14')};--panel:${pickColor('panel','#101520')};--text:${pickColor('text','#ebebeb')};--gold:${pickColor('accent','#c0a062')};--button-bg:${pickColor('button','#c0a062')};--button-hover:${pickColor('buttonHover','#d4b475')};--button-fg:${pickColor('buttonText','#0a0d14')};--serif:"${heading}",Georgia,serif;--display:"${heading}",Georgia,serif;--sans:"${body}",sans-serif;--hero-image:url("${hero}")}`;
+  return reply.type('text/css; charset=utf-8').header('cache-control','private, max-age=30').send(css);
 });
 app.get('/media/*', async (req, reply) => {
   const key=req.params['*'];
-  if(!/^(?:venues\/(?:ceremony|reception)|gifts)\/[a-f0-9-]{36}\.(jpg|png|webp)$/.test(key)&&!/^weddings\/[a-f0-9-]{36}\/(?:venues\/(?:ceremony|reception)|gifts)\/[a-f0-9-]{36}\.(jpg|png|webp)$/.test(key)) return reply.code(404).send({error:'Imagem não encontrada.'});
+  if(!/^(?:venues\/(?:ceremony|reception)|gifts)\/[a-f0-9-]{36}\.(jpg|png|webp)$/.test(key)&&!/^weddings\/[a-f0-9-]{36}\/(?:(?:venues\/(?:ceremony|reception)\/)|(?:gifts|hero)\/)[a-f0-9-]{36}\.(jpg|png|webp)$/.test(key)) return reply.code(404).send({error:'Imagem não encontrada.'});
   try {
     const image=await getImage(key);
     reply.header('content-type',image.ContentType||'application/octet-stream').header('cache-control',image.CacheControl||'public, max-age=31536000, immutable').header('x-content-type-options','nosniff');
@@ -194,7 +214,7 @@ app.post('/api/admin/register', { config: { rateLimit: { max: 3, timeWindow: '15
   const hashed = await passwordHash(password), db = await pool.connect();
   try {
     await db.query('BEGIN');
-    const base = await db.query('SELECT id FROM weddings WHERE slug=$1', [defaultWeddingSlug]);
+    const base = await db.query('SELECT wedding_id AS id FROM legacy_admin_tenants WHERE singleton=true');
     await db.query("SELECT set_config('app.wedding_id',$1,true)", [base.rows[0].id]);
     const defaults = await db.query("SELECT key,value FROM site_settings WHERE wedding_id=$1", [base.rows[0].id]);
     const wedding = await db.query('INSERT INTO weddings(slug,title) VALUES($1,$2) ON CONFLICT(slug) DO NOTHING RETURNING id', [slug,title.trim()]);
@@ -232,15 +252,55 @@ app.post('/api/admin/login', { config: { rateLimit: { max: 5, timeWindow: '15 mi
   const supplied = password;
   const expectedHash = createHash('sha256').update(expected || '').digest();
   const suppliedHash = createHash('sha256').update(typeof supplied === 'string' && supplied.length <= 200 ? supplied : '').digest();
-  if (!expected || req.weddingSlug !== defaultWeddingSlug || !timingSafeEqual(expectedHash, suppliedHash)) return reply.code(401).send({ error: 'Usuário/e-mail ou senha inválidos.' });
-  reply.setCookie('admin_session', 'admin:legacy', { signed: true, httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'strict', path: '/', maxAge: 60 * 60 * 8 });
+  const legacyTenant = await req.db.query('SELECT wedding_id FROM legacy_admin_tenants WHERE singleton=true');
+  if (!expected || !legacyTenant.rowCount || legacyTenant.rows[0].wedding_id !== req.weddingId || !timingSafeEqual(expectedHash, suppliedHash)) return reply.code(401).send({ error: 'Usuário/e-mail ou senha inválidos.' });
+  reply.setCookie('admin_session', `admin:legacy:${req.weddingId}`, { signed: true, httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'strict', path: '/', maxAge: 60 * 60 * 8 });
   return { ok: true };
 });
 app.post('/api/admin/logout', { preHandler: requireAdmin }, async (req, reply) => { reply.clearCookie('admin_session', { path: '/' }); return { ok: true }; });
 app.get('/api/admin/data', { preHandler: requireAdmin }, async (req) => {
-  const [memories, guests, suppliers, gifts, settings] = await Promise.all([req.db.query('SELECT * FROM memories ORDER BY created_at DESC'), req.db.query('SELECT * FROM guests ORDER BY created_at DESC'), req.db.query('SELECT * FROM suppliers ORDER BY name'),req.db.query('SELECT * FROM gifts ORDER BY category,title'),req.db.query("SELECT key,value FROM site_settings WHERE key IN ('venue_ceremony','venue_reception','story_content','event_schedule') ORDER BY key")]);
+  const [memories, guests, suppliers, gifts, settings] = await Promise.all([req.db.query('SELECT * FROM memories ORDER BY created_at DESC'), req.db.query('SELECT * FROM guests ORDER BY created_at DESC'), req.db.query('SELECT * FROM suppliers ORDER BY name'),req.db.query('SELECT * FROM gifts ORDER BY category,title'),req.db.query("SELECT key,value FROM site_settings WHERE key IN ('venue_ceremony','venue_reception','story_content','event_schedule','design_theme') ORDER BY key")]);
   const values=Object.fromEntries(settings.rows.map(r=>[r.key,r.value]));
-  return { memories: memories.rows.map(r => ({ ...memoryOut(r), whatsapp:r.whatsapp, isVisible:r.is_visible })), guests: guests.rows.map(r => ({ ...guestOut(r), whatsapp:r.whatsapp, isVisible:r.is_visible })), suppliers: suppliers.rows.map(r => ({ id:r.id,name:r.name,role:r.role,contact:r.contact,cost:Number(r.cost),paidAmount:Number(r.paid_amount),status:r.status,isVisible:r.is_visible })), gifts:gifts.rows.map(giftOut), venues: ['venue_ceremony','venue_reception'].map(k=>values[k]).filter(Boolean), story:values.story_content||null, event:values.event_schedule||null };
+  return { wedding:{slug:req.weddingSlug,title:req.weddingTitle}, memories: memories.rows.map(r => ({ ...memoryOut(r), whatsapp:r.whatsapp, isVisible:r.is_visible })), guests: guests.rows.map(r => ({ ...guestOut(r), whatsapp:r.whatsapp, isVisible:r.is_visible })), suppliers: suppliers.rows.map(r => ({ id:r.id,name:r.name,role:r.role,contact:r.contact,cost:Number(r.cost),paidAmount:Number(r.paid_amount),status:r.status,isVisible:r.is_visible })), gifts:gifts.rows.map(giftOut), venues: ['venue_ceremony','venue_reception'].map(k=>values[k]).filter(Boolean), story:values.story_content||null, event:values.event_schedule||null, design:values.design_theme||null };
+});
+app.patch('/api/admin/slug', { preHandler: requireAdmin }, async (req, reply) => {
+  const { slug } = req.body || {};
+  if (typeof slug !== 'string' || slug.length > 80 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) return reply.code(400).send({ error: 'Use um slug com letras minúsculas, números e hífens, sem espaços.' });
+  try {
+    const result = await req.db.query('UPDATE weddings SET slug=$1 WHERE id=$2 RETURNING slug', [slug, req.weddingId]);
+    if (!result.rowCount) return reply.code(404).send({ error: 'Casamento não encontrado.' });
+    return { ok:true, slug:result.rows[0].slug, url:`/casamento/${result.rows[0].slug}` };
+  } catch (error) {
+    if (error.code === '23505') return reply.code(409).send({ error: 'Este endereço já está sendo usado por outro casamento. Escolha outro slug.' });
+    throw error;
+  }
+});
+const themePresets = new Set(['dourado-classico','azul-mar-profundo','verde-esperanca','vermelho-apaixonado','lavanda-serena','personalizado']);
+const themeFonts = { heading:new Set(['Cinzel','Playfair Display','Cormorant Garamond','Georgia']), body:new Set(['Montserrat','Lora','Arial','Georgia']) };
+const validColor = value => typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value);
+function validHeroImage(value) {
+  return typeof value === 'string' && (/^\/images\/[a-zA-Z0-9_-]+\.(?:jpg|jpeg|png|webp)$/.test(value)||/^\/media\/weddings\/[a-f0-9-]{36}\/hero\/[a-f0-9-]{36}\.(?:jpg|png|webp)$/.test(value));
+}
+app.patch('/api/admin/design', { preHandler: requireAdmin }, async (req,reply)=>{
+  const {preset,colors,fonts,heroImage,heroImageKey=''}=req.body||{};
+  if(!themePresets.has(preset)||!colors||!['background','panel','text','accent','button','buttonHover','buttonText'].every(key=>validColor(colors[key]))||!fonts||!themeFonts.heading.has(fonts.heading)||!themeFonts.body.has(fonts.body)||!validHeroImage(heroImage)||typeof heroImageKey!=='string'||(heroImageKey&&!/^weddings\/[a-f0-9-]{36}\/hero\/[a-f0-9-]{36}\.(?:jpg|png|webp)$/.test(heroImageKey)))return reply.code(400).send({error:'Confira as cores, fontes e imagem de capa informadas.'});
+  const design={preset,colors:Object.fromEntries(['background','panel','text','accent','button','buttonHover','buttonText'].map(key=>[key,colors[key].toLowerCase()])),fonts,heroImage,heroImageKey};
+  await req.db.query("INSERT INTO site_settings(wedding_id,key,value) VALUES($1,'design_theme',$2::jsonb) ON CONFLICT(wedding_id,key) DO UPDATE SET value=EXCLUDED.value,updated_at=now()",[req.weddingId,JSON.stringify(design)]);
+  return {ok:true,design};
+});
+app.post('/api/admin/design/hero', { preHandler: requireAdmin, bodyLimit: 5 * 1024 * 1024 + 64 * 1024 }, async(req,reply)=>{
+  let imageBuffer;
+  for await(const part of req.parts())if(part.type==='file'&&part.fieldname==='image')imageBuffer=await part.toBuffer();
+  const format=imageBuffer&&imageFormat(imageBuffer);
+  if(!format)return reply.code(400).send({error:'Envie uma imagem JPG, PNG ou WebP válida.'});
+  if(!isStorageConfigured())return reply.code(503).send({error:'Armazenamento de imagens não configurado.'});
+  const id=randomUUID(),key=`weddings/${req.weddingId}/hero/${id}.${format.ext}`;
+  await putImage(key,imageBuffer,format.type);
+  const current=await req.db.query("SELECT value FROM site_settings WHERE key='design_theme'");
+  const design=current.rows[0]?.value||{};
+  design.heroImage=`/media/${key}`;design.heroImageKey=key;
+  await req.db.query("INSERT INTO site_settings(wedding_id,key,value) VALUES($1,'design_theme',$2::jsonb) ON CONFLICT(wedding_id,key) DO UPDATE SET value=EXCLUDED.value,updated_at=now()",[req.weddingId,JSON.stringify(design)]);
+  return {ok:true,design};
 });
 app.patch('/api/admin/event-schedule', { preHandler: requireAdmin }, async (req,reply)=>{
   const {eventDate,eventTime,rsvpDeadline}=req.body||{};
