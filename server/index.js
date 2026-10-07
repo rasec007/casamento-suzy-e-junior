@@ -32,6 +32,7 @@ app.addHook('onRequest', async (request, reply) => {
   if (!['GET', 'HEAD'].includes(request.method)) return;
   const pathname = new URL(request.url, 'http://local').pathname;
   if (pathname.startsWith('/api/') || pathname.startsWith('/media/') || pathname.startsWith('/images/') || /\.(?:css|js|ico|png|jpe?g|webp|svg|woff2?)$/i.test(pathname)) return;
+  if (pathname === '/') return reply.code(200).header('cache-control', 'no-store').sendFile('not-found.html');
   const match = pathname.match(/^\/casamento\/([a-z0-9]+(?:-[a-z0-9]+)*)\/?$/);
   if (match) {
     const found = await pool.query('SELECT 1 FROM weddings WHERE slug=$1', [match[1]]);
