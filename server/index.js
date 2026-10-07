@@ -335,7 +335,11 @@ app.post('/api/admin/payments/test', { preHandler: requireAdmin }, async(req,rep
     const account=await asaasRequest(result.rows[0].environment,decryptSecret(result.rows[0].api_key_cipher),'/myAccount');
     await req.db.query('UPDATE payment_integrations SET is_active=false,last_tested_at=now(),updated_at=now() WHERE wedding_id=$1',[req.weddingId]);
     return {ok:true,account:{name:account.name||account.company||'Conta validada',email:account.email||''}};
-  }catch(error){req.log.warn({err:error,weddingId:req.weddingId},'Falha ao validar a conta Asaas');return reply.code(502).send({error:error.message.slice(0,350)});}
+  }catch(error){
+    req.log.warn({err:error,weddingId:req.weddingId},'Falha ao validar a conta Asaas');
+    const detail=error.name==='TimeoutError'?'Tempo limite ao conectar com o Asaas.':error.cause?.code?`Falha de rede ao conectar com o Asaas (${error.cause.code}).`:error.message;
+    return reply.code(502).send({error:String(detail||'Não foi possível validar a conta Asaas.').slice(0,350)});
+  }
 });
 app.patch('/api/admin/payments/activation', { preHandler: requireAdmin }, async(req,reply)=>{
   const {enabled,webhookConfigured}=req.body||{};

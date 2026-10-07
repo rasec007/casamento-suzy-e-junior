@@ -25,8 +25,9 @@ if(revealObserver&&!matchMedia('(prefers-reduced-motion: reduce)').matches){
 async function api(path, options={}) {
   const isFormData=options.body instanceof FormData;
   const response=await fetch(path,{...options,headers:{...(options.body&&!isFormData?{'content-type':'application/json'}:{}),'x-wedding-slug':weddingSlug,...options.headers},credentials:'same-origin'});
-  const payload=response.status===204?{}:await response.json().catch(()=>({}));
-  if(!response.ok) throw new Error(payload.error||'Não foi possível concluir a solicitação.');
+  const responseText=response.status===204?'':await response.text();
+  let payload={};try{payload=responseText?JSON.parse(responseText):{}}catch{}
+  if(!response.ok){const fallback=response.status===502?'O servidor ou o proxy retornou 502 ao consultar o Asaas. Verifique os logs do serviço no EasyPanel; nenhuma conexão foi confirmada.':`A solicitação falhou (HTTP ${response.status}).`;throw new Error(payload.error||payload.message||fallback)}
   return payload;
 }
 function notify(message,type='success'){window.showToast?.(message,type)}

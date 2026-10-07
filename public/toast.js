@@ -39,7 +39,7 @@
       if (notified.get(element) === message) continue;
       notified.set(element, message);
       const loading = /^(salvando|validando|consultando|criando|enviando|carregando|atualizando|excluindo)/i.test(message);
-      const failure = /(inv[aá]lid|erro|falha|n[aã]o (foi poss[ií]vel|encontrad|cadastrad|permitid|pode)|obrigat|necess[aá]ri|confira|limite|excedid|encerrad)/i.test(message);
+      const failure = /(inv[aá]lid|erro|falha|gateway|\b50[0234]\b|tempo limite|indispon[ií]vel|n[aã]o (foi poss[ií]vel|encontrad|cadastrad|permitid|pode)|obrigat|necess[aá]ri|confira|limite|excedid|encerrad)/i.test(message);
       element.textContent = '';
       window.showToast(message, loading ? 'info' : failure ? 'error' : 'success');
     }
