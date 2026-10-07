@@ -29,7 +29,7 @@ async function api(path, options={}) {
   if(!response.ok) throw new Error(payload.error||'Não foi possível concluir a solicitação.');
   return payload;
 }
-function notify(message){const toast=$('#toast');toast.textContent=message;toast.classList.add('show');clearTimeout(notify.timer);notify.timer=setTimeout(()=>toast.classList.remove('show'),3200)}
+function notify(message,type='success'){const toast=$('#toast');toast.textContent=message;toast.dataset.type=type;toast.classList.add('show');clearTimeout(notify.timer);notify.timer=setTimeout(()=>toast.classList.remove('show'),5000)}
 function renderVenues(){
   $('#venues').innerHTML=state.venues.map(venue=>{const eyebrow=venue.id==='ceremony'&&state.event?venue.eyebrow.replace(/\d{2}H\d{2}/,state.event.eventTime.replace(':','H')):venue.eyebrow;return `<article class="venue"><p class="eyebrow">${esc(eyebrow)}</p><h3>${esc(venue.title)}</h3><p class="venue-name">${esc(venue.name)}</p><p>${esc(venue.address)}</p>${venue.imageUrl?`<div class="venue-photo"><img loading="lazy" src="${esc(venue.imageUrl)}" alt="${esc(venue.imageAlt)}"></div>`:''}<a class="outline block" target="_blank" rel="noopener noreferrer" href="${esc(venue.mapsUrl)}">Abrir rota no Google Maps ↗</a></article>`}).join('');
 }
@@ -85,6 +85,7 @@ function recordRows(){
   };
   return state.adminTab==='visao-geral'?[...lists.presentes,...lists.convidados,...lists.fornecedores]:lists[state.adminTab];
 }
+function recordKindLabel(kind){return ({memories:'Dedicatória',guests:'Confirmação de presença',suppliers:'Fornecedor'})[kind]||'Registro'}
 function renderAdmin(){
   if(!state.admin)return;
   if(state.adminTab==='endereco'){
@@ -141,7 +142,7 @@ async function adminAction(action){
     $('#login-form').addEventListener('submit',async event=>{event.preventDefault();const form=event.currentTarget,data=Object.fromEntries(new FormData(form));try{await api('/api/admin/login',{method:'POST',body:JSON.stringify(data)});await loadAdmin()}catch(error){$('.form-status',form).textContent=error.message}});
     $('#register-form [name="title"]').addEventListener('input',event=>{const slug=$('#register-form [name="slug"]');if(!slug.dataset.edited)slug.value=event.target.value.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'').slice(0,80)});
     $('#register-form [name="slug"]').addEventListener('input',event=>{event.target.dataset.edited='true';event.target.value=event.target.value.toLowerCase()});
-    $('#register-form').addEventListener('submit',async event=>{event.preventDefault();const form=event.currentTarget,data=Object.fromEntries(new FormData(form));try{const result=await api('/api/admin/register',{method:'POST',body:JSON.stringify(data)});weddingSlug=result.wedding.slug;history.replaceState(null,'',`/casamento/${weddingSlug}`);connectRealtime();await loadSite();await loadAdmin()}catch(error){$('.form-status',form).textContent=error.message}});
+    $('#register-form').addEventListener('submit',async event=>{event.preventDefault();const form=event.currentTarget,data=Object.fromEntries(new FormData(form));try{const result=await api('/api/admin/register',{method:'POST',body:JSON.stringify(data)});weddingSlug=result.wedding.slug;history.replaceState(null,'',`/casamento/${weddingSlug}`);connectRealtime();await loadSite();await loadAdmin();notify('Casamento e acesso dos noivos cadastrados.')}catch(error){$('.form-status',form).textContent=error.message;notify(error.message,'error')}});
   }
 }
 $('#categories').addEventListener('click',event=>{const button=event.target.closest('[data-category]');if(button){state.category=button.dataset.category;renderGifts()}});
@@ -153,7 +154,7 @@ $('#gift-dialog').addEventListener('submit',async event=>{
   const dedication=event.target.closest('#dedication-form');if(!dedication)return;event.preventDefault();const status=$('.form-status',dedication),data=Object.fromEntries(new FormData(dedication));
   try{await api('/api/admin/memories',{method:'POST',body:JSON.stringify(data)});$('#gift-dialog').close();await loadSite();state.adminTab='presentes';await loadAdmin();notify('Dedicatória adicionada à Penseira.')}catch(error){status.textContent=error.message}
 });
-$('#rsvp-form').addEventListener('submit',async event=>{event.preventDefault();const form=event.currentTarget, status=$('.form-status',form), button=$('button',form);button.disabled=true;status.textContent='';try{const data=Object.fromEntries(new FormData(form));data.companions=Number(data.companions);const result=await api('/api/rsvp',{method:'POST',body:JSON.stringify(data)});const name=data.name;form.reset();status.textContent=`Presença de ${name} confirmada${result.notificationSent?' — enviamos a confirmação por WhatsApp.':'; não foi possível enviar o WhatsApp agora, mas o RSVP foi salvo.'} Seu reflexo aparecerá no Espelho.`;await loadSite()}catch(error){status.textContent=error.message}finally{button.disabled=false}});
+$('#rsvp-form').addEventListener('submit',async event=>{event.preventDefault();const form=event.currentTarget, status=$('.form-status',form), button=$('button',form);button.disabled=true;status.textContent='';try{const data=Object.fromEntries(new FormData(form));data.companions=Number(data.companions);const result=await api('/api/rsvp',{method:'POST',body:JSON.stringify(data)});const name=data.name;form.reset();status.textContent=`Presença de ${name} confirmada${result.notificationSent?' — enviamos a confirmação por WhatsApp.':'; não foi possível enviar o WhatsApp agora, mas o RSVP foi salvo.'} Seu reflexo aparecerá no Espelho.`;notify(`Presença de ${name} confirmada.`);await loadSite()}catch(error){status.textContent=error.message;notify(error.message,'error')}finally{button.disabled=false}});
 $('#mirror-search').addEventListener('input',event=>{state.search=event.target.value;renderGuests()});
 $('#admin-open').addEventListener('click',async()=>{const dialog=$('#admin-dialog');dialog.showModal();try{await loadAdmin()}catch(error){state.admin=null;await adminAction('login')}});
 if(new URLSearchParams(location.search).get('painel')==='1'){
@@ -179,11 +180,11 @@ $('#admin-content').addEventListener('click',async event=>{
   if(target.dataset.tab){state.adminTab=target.dataset.tab;renderAdmin();return}
   const kind=target.dataset.toggle||target.dataset.delete||target.dataset.edit,id=target.dataset.id;if(!kind||!id)return;
   try{
-    if(target.dataset.toggle){await api(`/api/admin/${kind}/${id}`,{method:'PATCH',body:JSON.stringify({isVisible:target.dataset.visible!=='true'})})}
-    if(target.dataset.delete){if(!confirm('Excluir este registro permanentemente?'))return;await api(`/api/admin/${kind}/${id}`,{method:'DELETE'})}
-    if(target.dataset.edit){const row=recordRows().find(item=>item.kind===kind&&item.id===id);if(!row)return;const values={};for(const [field,label,value] of row.edit){const next=prompt(label,value??'');if(next===null)return;values[field]=['companions','cost','paidAmount'].includes(field)?Number(next):next}await api(`/api/admin/${kind}/${id}`,{method:'PATCH',body:JSON.stringify(values)})}
+    if(target.dataset.toggle){const visible=target.dataset.visible!=='true';await api(`/api/admin/${kind}/${id}`,{method:'PATCH',body:JSON.stringify({isVisible:visible})});notify(`${recordKindLabel(kind)} ${visible?'exibido':'ocultado'} no site.`)}
+    if(target.dataset.delete){if(!confirm('Excluir este registro permanentemente?'))return;await api(`/api/admin/${kind}/${id}`,{method:'DELETE'});notify(`${recordKindLabel(kind)} excluído.`)}
+    if(target.dataset.edit){const row=recordRows().find(item=>item.kind===kind&&item.id===id);if(!row)return;const values={};for(const [field,label,value] of row.edit){const next=prompt(label,value??'');if(next===null)return;values[field]=['companions','cost','paidAmount'].includes(field)?Number(next):next}await api(`/api/admin/${kind}/${id}`,{method:'PATCH',body:JSON.stringify(values)});notify(`${recordKindLabel(kind)} atualizado.`)}
     await loadAdmin();await loadSite();
-  }catch(error){$('#admin-status').textContent=error.message}
+  }catch(error){$('#admin-status').textContent=error.message;notify(error.message,'error')}
 });
 $('#admin-content').addEventListener('submit',async event=>{
   const paymentForm=event.target.closest('#payment-config-form');if(paymentForm){event.preventDefault();const status=$('#payment-config-status'),data=Object.fromEntries(new FormData(paymentForm));data.rotateWebhookToken=Boolean(data.rotateWebhookToken);if(!data.apiKey)delete data.apiKey;const button=$('button[type="submit"]',paymentForm);button.disabled=true;status.textContent='Salvando as credenciais criptografadas…';try{const result=await api('/api/admin/payments/config',{method:'PUT',body:JSON.stringify(data)});state.webhookToken=result.webhookToken;await loadAdmin();notify('Configuração Asaas salva. Copie a URL e o token do Webhook para o painel Asaas.')}catch(error){status.textContent=error.message}finally{button.disabled=false}return}
