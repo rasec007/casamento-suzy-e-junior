@@ -13,6 +13,7 @@ import { createHash, timingSafeEqual, randomUUID, scrypt as scryptCallback, rand
 import { promisify } from 'node:util';
 import { INITIAL_GIFTS, INITIAL_MEMORIES, INITIAL_GUESTS, INITIAL_SUPPLIERS } from './seed-data.js';
 import { sendRsvpConfirmation } from './evolution.js';
+import { normalizeBrazilianPhone, normalizeGuestName } from './guest-match.js';
 import { asaasRequest, decryptSecret, encryptSecret, hashWebhookToken, secureTokenMatches } from './asaas.js';
 import { isStorageConfigured, ensureBucket, putImage, getImage, deleteImage, closeStorage } from './storage.js';
 
@@ -100,7 +101,6 @@ app.addHook('onSend', async (request, reply, payload) => {
 });
 const text = (value, max = 120) => typeof value === 'string' && value.trim().length > 0 && value.trim().length <= max;
 const phone = value => typeof value === 'string' && /^[+()\d .-]{8,24}$/.test(value);
-const normalizeBrazilianPhone = value => { const digits=String(value||'').replace(/\D/g,'');return digits.startsWith('55')&&[12,13].includes(digits.length)?digits.slice(2):digits; };
 const money = value => Number.isFinite(Number(value)) && Number(value) >= 0 && Number(value) <= 10000000;
 const paymentsWebhookBase = request => process.env.PAYMENTS_WEBHOOK_BASE_URL || (process.env.NODE_ENV==='production'&&process.env.APP_URL?process.env.APP_URL:`${request.protocol}://${request.headers.host}`);
 const isoDate = value => typeof value==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(value)&&!Number.isNaN(new Date(`${value}T12:00:00-03:00`).valueOf())&&new Date(`${value}T12:00:00-03:00`).toISOString().slice(0,10)===value;
@@ -376,10 +376,11 @@ app.post('/api/payments/checkout', { config:{rateLimit:{max:5,timeWindow:'15 min
   const active=await req.db.query("SELECT id FROM gift_payments WHERE wedding_id=$1 AND gift_id=$2 AND status IN ('CREATING','PENDING') LIMIT 1",[req.weddingId,giftId]);
   if(active.rowCount)return reply.code(409).send({error:'Este presente já está reservado em um checkout em andamento. Tente novamente quando a reserva expirar.'});
   const normalizedPhone=normalizeBrazilianPhone(whatsapp);
-  const guest=await req.db.query("SELECT id FROM guests WHERE lower(trim(name))=lower(trim($1)) AND regexp_replace(regexp_replace(whatsapp,'[^0-9]','','g'),'^55','')=$2 LIMIT 1",[senderName,normalizedPhone]);
-  if(!guest.rowCount)return reply.code(403).send({error:'O pagamento de presentes está disponível para quem confirmou presença. Confira nome e WhatsApp usados no RSVP.'});
+  const registeredGuests=await req.db.query('SELECT id,name,whatsapp FROM guests WHERE wedding_id=$1',[req.weddingId]);
+  const guest=registeredGuests.rows.find(row=>normalizeBrazilianPhone(row.whatsapp)===normalizedPhone&&normalizeGuestName(row.name)===normalizeGuestName(senderName));
+  if(!guest)return reply.code(403).send({error:'Não encontramos uma confirmação com esse WhatsApp e nome. Use os mesmos dados informados no RSVP; acentos, espaços e pontuação no nome não precisam ser idênticos.'});
   const inserted=await req.db.query(`INSERT INTO gift_payments(wedding_id,gift_id,gift_title,guest_id,sender_name,whatsapp,dedication,amount,status,expires_at)
-    VALUES($1,$2,$3,$4,$5,$6,$7,$8,'CREATING',now()+interval '65 minutes') RETURNING id`,[req.weddingId,giftId,gift.title,guest.rows[0].id,senderName.trim(),whatsapp.trim(),dedication.trim(),gift.price]);
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,'CREATING',now()+interval '65 minutes') RETURNING id`,[req.weddingId,giftId,gift.title,guest.id,senderName.trim(),whatsapp.trim(),dedication.trim(),gift.price]);
   const paymentId=inserted.rows[0].id;
   const baseUrl=process.env.NODE_ENV==='production'&&process.env.APP_URL?process.env.APP_URL.replace(/\/$/,''):`${req.protocol}://${req.headers.host}`;
   const callback=`${baseUrl}/casamento/${encodeURIComponent(req.weddingSlug)}?pagamento=`;

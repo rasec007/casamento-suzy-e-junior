@@ -10,7 +10,7 @@
     "dev": "node --watch server/index.js",
     "start": "node server/index.js",
     "db:migrate": "node server/migrate.js",
-    "check": "node --check server/index.js && node --check server/evolution.js && node --check server/asaas.js && node --check server/storage.js && node --check public/app.js && node --check public/toast.js && node --check public/not-found.js && node --check server/migrate.js && node --check test/run.js && node --check test/evolution.test.js && node --check test/asaas.test.js",
+    "check": "node --check server/index.js && node --check server/guest-match.js && node --check server/evolution.js && node --check server/asaas.js && node --check server/storage.js && node --check public/app.js && node --check public/toast.js && node --check public/not-found.js && node --check server/migrate.js && node --check test/run.js && node --check test/evolution.test.js && node --check test/asaas.test.js && node --check test/guest-match.test.js",
     "test": "node test/run.js"
   },
   "dependencies": {
