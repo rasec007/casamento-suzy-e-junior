@@ -53,6 +53,17 @@
   color: #e9a0a0;
 }
 
+#toast[data-type="info"] {
+  border-color: #8baec988;
+  border-left-color: #8baec9;
+}
+
+#toast[data-type="info"]::before {
+  content: "…";
+  border-color: #8baec988;
+  color: #a9cbe4;
+}
+
 @media (prefers-reduced-motion: reduce) {
   #toast { transition: none; }
 }
