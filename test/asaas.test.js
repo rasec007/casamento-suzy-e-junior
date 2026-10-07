@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { asaasRequest, decryptSecret, encryptSecret, secureTokenMatches, hashWebhookToken } from '../server/asaas.js';
+import { asaasCheckoutUrl, asaasRequest, decryptSecret, encryptSecret, secureTokenMatches, hashWebhookToken } from '../server/asaas.js';
 
 const withEncryptionKey = async callback => {
   const previous = process.env.PAYMENTS_ENCRYPTION_KEY;
@@ -33,6 +33,17 @@ test('sends Asaas credentials only to the selected official environment', async 
   assert.equal(request.options.headers.access_token, 'sandbox-secret');
   assert.equal(response.name, 'Conta de teste');
   await assert.rejects(asaasRequest('sandbox','secret','//attacker.example'), /Ambiente ou rota Asaas inválidos/);
+});
+
+test('builds a safe official checkout URL when Asaas returns only its ID', () => {
+  const id='c7b1c696-b27b-4d3d-80b9-d1c018e387f8';
+  assert.equal(asaasCheckoutUrl('sandbox',{id}),`https://sandbox.asaas.com/checkoutSession/show?id=${id}`);
+  assert.equal(asaasCheckoutUrl('production',{id}),`https://asaas.com/checkoutSession/show?id=${id}`);
+});
+
+test('uses the Asaas checkout link when returned and rejects foreign hosts', () => {
+  assert.equal(asaasCheckoutUrl('sandbox',{id:'checkout-123',link:'https://sandbox.asaas.com/checkoutSession/show/checkout-123'}),'https://sandbox.asaas.com/checkoutSession/show/checkout-123');
+  assert.throws(()=>asaasCheckoutUrl('sandbox',{id:'checkout-123',link:'https://example.com/pay'}),/endereço de checkout inesperado/);
 });
 
 test('surfaces Asaas validation errors without exposing credentials', async () => {

@@ -4,6 +4,19 @@ const endpoints = {
   sandbox: 'https://api-sandbox.asaas.com/v3',
   production: 'https://api.asaas.com/v3',
 };
+const checkoutHosts = { sandbox: 'sandbox.asaas.com', production: 'asaas.com' };
+
+export function asaasCheckoutUrl(environment, checkout) {
+  const host = checkoutHosts[environment];
+  if (!host || !checkout || typeof checkout.id !== 'string' || !/^[a-z\d-]{1,80}$/i.test(checkout.id)) {
+    throw new Error('O Asaas retornou um identificador de checkout inválido.');
+  }
+  const url = new URL(checkout.link || `/checkoutSession/show?id=${encodeURIComponent(checkout.id)}`, `https://${host}`);
+  if (url.protocol !== 'https:' || url.hostname !== host || url.username || url.password) {
+    throw new Error('O Asaas retornou um endereço de checkout inesperado.');
+  }
+  return url.toString();
+}
 
 function encryptionKey() {
   const value = process.env.PAYMENTS_ENCRYPTION_KEY || '';

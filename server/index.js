@@ -14,7 +14,7 @@ import { promisify } from 'node:util';
 import { INITIAL_GIFTS, INITIAL_MEMORIES, INITIAL_GUESTS, INITIAL_SUPPLIERS } from './seed-data.js';
 import { sendRsvpConfirmation } from './evolution.js';
 import { normalizeBrazilianPhone, normalizeGuestName } from './guest-match.js';
-import { asaasRequest, decryptSecret, encryptSecret, hashWebhookToken, secureTokenMatches } from './asaas.js';
+import { asaasCheckoutUrl, asaasRequest, decryptSecret, encryptSecret, hashWebhookToken, secureTokenMatches } from './asaas.js';
 import { isStorageConfigured, ensureBucket, putImage, getImage, deleteImage, closeStorage } from './storage.js';
 
 const root = dirname(fileURLToPath(import.meta.url));
@@ -387,11 +387,9 @@ app.post('/api/payments/checkout', { config:{rateLimit:{max:5,timeWindow:'15 min
   const payload={billingTypes:['PIX','CREDIT_CARD'],chargeTypes:['DETACHED'],minutesToExpire:60,externalReference:paymentId,callback:{successUrl:`${callback}sucesso#presentes`,cancelUrl:`${callback}cancelado#presentes`,expiredUrl:`${callback}expirado#presentes`},items:[{externalReference:gift.id,name:gift.title,description:`Presente de casamento para ${req.weddingTitle}`,quantity:1,value:Number(gift.price)}],customerData:{name:senderName.trim(),phone:normalizedPhone,...(email.trim()?{email:email.trim()}:{} )}};
   try{
     const apiKey=decryptSecret(config.rows[0].api_key_cipher),checkout=await asaasRequest(config.rows[0].environment,apiKey,'/checkouts',{method:'POST',body:payload});
-    const allowedHost=config.rows[0].environment==='sandbox'?'sandbox.asaas.com':'asaas.com';
-    const checkoutUrl=new URL(checkout.link);
-    if(checkoutUrl.protocol!=='https:'||checkoutUrl.hostname!==allowedHost)throw new Error('O Asaas retornou um endereço de checkout inesperado.');
-    await req.db.query("UPDATE gift_payments SET status='PENDING',checkout_id=$1,checkout_url=$2,updated_at=now() WHERE id=$3",[checkout.id,checkoutUrl.toString(),paymentId]);
-    return reply.code(201).send({paymentId,checkoutUrl:checkoutUrl.toString(),expiresAt:new Date(Date.now()+60*60*1000).toISOString()});
+    const checkoutUrl=asaasCheckoutUrl(config.rows[0].environment,checkout);
+    await req.db.query("UPDATE gift_payments SET status='PENDING',checkout_id=$1,checkout_url=$2,updated_at=now() WHERE id=$3",[checkout.id,checkoutUrl,paymentId]);
+    return reply.code(201).send({paymentId,checkoutUrl,expiresAt:new Date(Date.now()+60*60*1000).toISOString()});
   }catch(error){await req.db.query("UPDATE gift_payments SET status='FAILED',updated_at=now() WHERE id=$1",[paymentId]);req.log.warn({err:error,weddingId:req.weddingId,paymentId},'Não foi possível criar checkout no Asaas');return reply.code(502).send({error:error.message.slice(0,350)});}
 });
 app.post('/api/webhooks/asaas/:weddingId', { config:{rateLimit:{max:120,timeWindow:'1 minute'}} }, async(req,reply)=>{
