@@ -16,7 +16,10 @@
     <form id="site-url-form">
       <label for="site-url">Digite a URL do site ou o slug do casamento</label>
       <input id="site-url" name="siteUrl" type="text" required autocomplete="url" spellcheck="false" placeholder="https://seusite.com.br/casamento/nome-do-casal">
-      <button type="submit">Acessar site</button>
+      <div class="form-actions">
+        <button type="submit" name="destination" value="site">Acessar site</button>
+        <button type="submit" name="destination" value="panel" class="panel-button">Acessar painel dos noivos</button>
+      </div>
       <p id="url-status" role="status" aria-live="polite"></p>
     </form>
   </main>

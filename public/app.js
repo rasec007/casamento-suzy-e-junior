@@ -143,6 +143,10 @@ $('#gift-dialog').addEventListener('submit',async event=>{
 $('#rsvp-form').addEventListener('submit',async event=>{event.preventDefault();const form=event.currentTarget, status=$('.form-status',form), button=$('button',form);button.disabled=true;status.textContent='';try{const data=Object.fromEntries(new FormData(form));data.companions=Number(data.companions);const result=await api('/api/rsvp',{method:'POST',body:JSON.stringify(data)});const name=data.name;form.reset();status.textContent=`Presença de ${name} confirmada${result.notificationSent?' — enviamos a confirmação por WhatsApp.':'; não foi possível enviar o WhatsApp agora, mas o RSVP foi salvo.'} Seu reflexo aparecerá no Espelho.`;await loadSite()}catch(error){status.textContent=error.message}finally{button.disabled=false}});
 $('#mirror-search').addEventListener('input',event=>{state.search=event.target.value;renderGuests()});
 $('#admin-open').addEventListener('click',async()=>{const dialog=$('#admin-dialog');dialog.showModal();try{await loadAdmin()}catch(error){state.admin=null;await adminAction('login')}});
+if(new URLSearchParams(location.search).get('painel')==='1'){
+  history.replaceState(null,'',location.pathname);
+  $('#admin-open').click();
+}
 $('#admin-dialog').addEventListener('click',event=>{if(event.target.closest('[data-close]'))event.currentTarget.close()});
 $('#admin-content').addEventListener('click',async event=>{
   const target=event.target.closest('button');if(!target)return;

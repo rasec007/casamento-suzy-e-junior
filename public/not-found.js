@@ -6,9 +6,10 @@ if (currentSlug) input.value = `${location.origin}/casamento/${currentSlug}`;
 
 form.addEventListener('submit', event => {
   event.preventDefault();
+  const destination = event.submitter?.value === 'panel' ? '?painel=1' : '';
   const value = input.value.trim();
   if (/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value)) {
-    location.assign(`/casamento/${value}`);
+    location.assign(`/casamento/${value}${destination}`);
     return;
   }
   let url;
@@ -27,5 +28,5 @@ form.addEventListener('submit', event => {
     status.textContent = 'Este endereço pertence a outro domínio. Abra o link oficial recebido dos noivos.';
     return;
   }
-  location.assign(`/casamento/${match[1]}`);
+  location.assign(`/casamento/${match[1]}${destination}`);
 });
