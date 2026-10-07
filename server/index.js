@@ -189,6 +189,17 @@ app.post('/api/rsvp', { config: { rateLimit: { max: 5, timeWindow: '15 minutes' 
   catch (error) { req.log.warn({ err: error }, 'RSVP salvo; não foi possível enviar a confirmação por WhatsApp.'); }
   return reply.code(201).send({ guest: guestOut(result.rows[0]), notificationSent });
 });
+app.post('/api/memories/dedication', { config: { rateLimit: { max: 5, timeWindow: '15 minutes' } } }, async (req, reply) => {
+  const { guestId, message, writtenAt } = req.body || {};
+  if (typeof guestId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(guestId) || !text(message, 1000) || !isoDate(writtenAt)) {
+    return reply.code(400).send({ error: 'Informe uma frase para a Penseira e a data em que foi escrita.' });
+  }
+  const guest = await req.db.query('SELECT name FROM guests WHERE id=$1 AND wedding_id=$2', [guestId, req.weddingId]);
+  if (!guest.rowCount) return reply.code(404).send({ error: 'Não encontramos a confirmação de presença associada. Confirme sua presença antes de enviar a dedicatória.' });
+  const createdAt = new Date(`${writtenAt}T12:00:00-03:00`);
+  const result = await req.db.query("INSERT INTO memories(sender_name,whatsapp,gift_title,gift_amount,message,created_at,wedding_id) VALUES($1,'','Dedicatória',0,$2,$3,$4) RETURNING id,sender_name,gift_title,gift_amount,message,created_at", [guest.rows[0].name, message.trim(), createdAt, req.weddingId]);
+  return reply.code(201).send({ memory: memoryOut(result.rows[0]) });
+});
 app.post('/api/memories', { config: { rateLimit: { max: 5, timeWindow: '15 minutes' } } }, async (req, reply) => {
   const { senderName, whatsapp, message = '', giftId } = req.body || {};
   if (!text(senderName, 120) || !phone(whatsapp) || typeof message !== 'string' || message.length > 1000 || !text(giftId, 40)) return reply.code(400).send({ error: 'Confira seus dados e a mensagem (até 1.000 caracteres).' });

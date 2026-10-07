@@ -1,0 +1,14 @@
+#rsvp-form[hidden],#rsvp-complete-status[hidden],#rsvp-dedication-panel[hidden]{display:none}
+.rsvp-complete-status{margin:18px 0;padding:14px 16px;border:1px solid #c0a06250;background:#c0a06210;color:var(--gold);font-size:12px;line-height:1.7}
+.rsvp-dedication-panel{margin-top:24px;padding:clamp(18px,4vw,30px);border:1px solid #9eb3c255;background:linear-gradient(145deg,#102033aa,#0d1726dd);text-align:left;animation:rsvp-arrive .45s ease both}
+.rsvp-dedication-panel>.eyebrow{text-align:center;color:#b7cfdd}
+.rsvp-dedication-panel h3{margin:0 0 8px;color:var(--gold);font:400 clamp(21px,3vw,28px) var(--serif);text-align:center}
+.rsvp-dedication-panel>.muted{text-align:center;line-height:1.8}
+.rsvp-dedication-panel .dialog-form{margin-top:22px}
+.rsvp-dedication-panel textarea{min-height:110px;resize:vertical;line-height:1.7}
+.rsvp-dedication-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.rsvp-dedication-actions button{min-height:44px}
+#presentes{scroll-margin-top:86px}
+@keyframes rsvp-arrive{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+@media(max-width:650px){.rsvp-dedication-actions{grid-template-columns:1fr}}
+@media(prefers-reduced-motion:reduce){.rsvp-dedication-panel{animation:none}}
