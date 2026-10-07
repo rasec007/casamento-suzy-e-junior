@@ -23,7 +23,7 @@ const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 12, 
 const live = new pg.Client({ connectionString: process.env.DATABASE_URL, application_name: 'suzy-junior-realtime' });
 
 await app.register(cookie, { secret: process.env.SESSION_SECRET || 'development-only-secret-change-this-now' });
-await app.register(helmet, { global: true, contentSecurityPolicy: { directives: { defaultSrc: ["'self'"], styleSrc: ["'self'", 'https://fonts.googleapis.com'], fontSrc: ["'self'", 'https://fonts.gstatic.com'], imgSrc: ["'self'", 'data:'], scriptSrc: ["'self'"], connectSrc: ["'self'"], objectSrc: ["'none'"], upgradeInsecureRequests: null } } });
+await app.register(helmet, { global: true, contentSecurityPolicy: { directives: { defaultSrc: ["'self'"], styleSrc: ["'self'", 'https://fonts.googleapis.com', 'https://use.typekit.net'], fontSrc: ["'self'", 'data:', 'https://fonts.gstatic.com', 'https://use.typekit.net'], imgSrc: ["'self'", 'data:'], scriptSrc: ["'self'"], connectSrc: ["'self'"], objectSrc: ["'none'"], upgradeInsecureRequests: null } } });
 await app.register(rateLimit, { global: true, max: 180, timeWindow: '1 minute' });
 await app.register(multipart, { limits: { fileSize: 5 * 1024 * 1024, files: 1, fields: 8, parts: 10 } });
 await app.register(fastifyStatic, { root: join(root, '../public'), prefix: '/', maxAge: process.env.NODE_ENV === 'production' ? '1h' : 0, immutable: false, wildcard: false });
@@ -249,7 +249,7 @@ app.post('/api/admin/register', { config: { rateLimit: { max: 3, timeWindow: '15
   } catch(error) { await db.query('ROLLBACK').catch(()=>{}); throw error; }
   finally { db.release(); }
 });
-app.post('/api/admin/login', { config: { rateLimit: { max: 5, timeWindow: '15 minutes' } } }, async (req, reply) => {
+app.post('/api/admin/login', { config: { rateLimit: { max: 8, timeWindow: '15 minutes', keyGenerator: request => createHash('sha256').update(`${request.ip}:${String(request.body?.email || request.body?.identifier || '').trim().toLowerCase()}`).digest('hex') } } }, async (req, reply) => {
   const { identifier: suppliedIdentifier, email, password } = req.body || {};
   const identifier = email || suppliedIdentifier;
   if (typeof identifier !== 'string' || identifier.length > 254 || typeof password !== 'string' || password.length > 200) return reply.code(401).send({ error: 'Usuário/e-mail ou senha inválidos.' });
