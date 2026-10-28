@@ -15,7 +15,7 @@ import { INITIAL_GIFTS, INITIAL_MEMORIES, INITIAL_GUESTS, INITIAL_SUPPLIERS } fr
 import { sendRsvpConfirmation } from './evolution.js';
 import { normalizeBrazilianPhone, normalizeGuestName } from './guest-match.js';
 import { asaasCheckoutUrl, asaasRequest, decryptSecret, encryptSecret, hashWebhookToken, secureTokenMatches } from './asaas.js';
-import { isStorageConfigured, ensureBucket, putImage, getImage, deleteImage, closeStorage } from './storage.js';
+import { isStorageConfigured, ensureStorage, putImage, getImage, deleteImage, closeStorage } from './storage.js';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const scrypt = promisify(scryptCallback);
@@ -104,7 +104,6 @@ const phone = value => typeof value === 'string' && /^[+()\d .-]{8,24}$/.test(va
 const money = value => Number.isFinite(Number(value)) && Number(value) >= 0 && Number(value) <= 10000000;
 const paymentsWebhookBase = request => process.env.PAYMENTS_WEBHOOK_BASE_URL || (process.env.NODE_ENV==='production'&&process.env.APP_URL?process.env.APP_URL:`${request.protocol}://${request.headers.host}`);
 const isoDate = value => typeof value==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(value)&&!Number.isNaN(new Date(`${value}T12:00:00-03:00`).valueOf())&&new Date(`${value}T12:00:00-03:00`).toISOString().slice(0,10)===value;
-const publicGuestFields = 'id, name, companions, created_at';
 const publicMemoryFields = 'id, sender_name, gift_title, gift_amount, message, created_at';
 const date = value => new Date(value).toLocaleDateString('pt-BR', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'America/Fortaleza' });
 const seedDate = value => { const [day, month, year] = value.replace('.', '').split(' '); const months = { Jan:0, Fev:1, Mar:2, Abr:3, Mai:4, Jun:5, Jul:6, Ago:7, Set:8, Out:9, Nov:10, Dez:11 }; return new Date(Date.UTC(Number(year), months[month], Number(day), 15)).toISOString(); };
@@ -146,10 +145,10 @@ app.get('/api/health', async (_req, reply) => {
   catch { return reply.code(503).send({ status: 'unavailable' }); }
 });
 app.get('/api/site', async (req) => {
-  const [gifts, memories, guests, venues, paymentIntegration] = await Promise.all([
+  const [gifts, memories, photos, venues, paymentIntegration] = await Promise.all([
     req.db.query('SELECT * FROM gifts ORDER BY id'),
     req.db.query(`SELECT ${publicMemoryFields} FROM memories WHERE is_visible ORDER BY created_at DESC LIMIT 100`),
-    req.db.query(`SELECT ${publicGuestFields} FROM guests WHERE is_visible ORDER BY created_at DESC LIMIT 250`),
+    req.db.query('SELECT id,image_key FROM mirror_photos ORDER BY position,created_at,id'),
     req.db.query("SELECT key,value FROM site_settings WHERE key IN ('venue_ceremony','venue_reception','story_content','event_schedule','design_theme') ORDER BY key")
     ,req.db.query('SELECT is_active FROM payment_integrations WHERE wedding_id=$1',[req.weddingId])
   ]);
@@ -157,7 +156,7 @@ app.get('/api/site', async (req) => {
   const activePayments=Boolean(paymentIntegration.rows[0]?.is_active);
   const pending=activePayments?await req.db.query("SELECT DISTINCT gift_id FROM gift_payments WHERE wedding_id=$1 AND status IN ('CREATING','PENDING') AND expires_at>now()",[req.weddingId]):{rows:[]};
   const reserved=new Set(pending.rows.map(row=>row.gift_id));
-  return { wedding:{slug:req.weddingSlug,title:req.weddingTitle}, gifts: gifts.rows.map(row=>({...giftOut(row),isReserved:reserved.has(row.id)})), memories: memories.rows.map(memoryOut), guests: guests.rows.map(guestOut), venues: ['venue_ceremony','venue_reception'].map(k=>settings[k]).filter(Boolean), story:settings.story_content||null, event:settings.event_schedule||null, design:settings.design_theme||null, paymentsEnabled:activePayments };
+  return { wedding:{slug:req.weddingSlug,title:req.weddingTitle}, gifts: gifts.rows.map(row=>({...giftOut(row),giftedBy:'',isReserved:reserved.has(row.id)})), memories: memories.rows.map(row=>({id:row.id,message:row.message,createdAt:date(row.created_at)})), photos: photos.rows.map(row=>({id:row.id,imageUrl:`/media/${row.image_key}`})), venues: ['venue_ceremony','venue_reception'].map(k=>settings[k]).filter(Boolean), story:settings.story_content||null, event:settings.event_schedule||null, design:settings.design_theme||null, paymentsEnabled:activePayments };
 });
 app.get('/api/theme.css', async(req,reply)=>{
   const result=await req.db.query("SELECT value FROM site_settings WHERE key='design_theme'");
@@ -170,7 +169,7 @@ app.get('/api/theme.css', async(req,reply)=>{
 });
 app.get('/media/*', async (req, reply) => {
   const key=req.params['*'];
-  if(!/^(?:venues\/(?:ceremony|reception)|gifts)\/[a-f0-9-]{36}\.(jpg|png|webp)$/.test(key)&&!/^weddings\/[a-f0-9-]{36}\/(?:(?:venues\/(?:ceremony|reception)\/)|(?:gifts|hero)\/)[a-f0-9-]{36}\.(jpg|png|webp)$/.test(key)) return reply.code(404).send({error:'Imagem não encontrada.'});
+  if(!/^(?:venues\/(?:ceremony|reception)|gifts)\/[a-f0-9-]{36}\.(jpg|png|webp)$/.test(key)&&!/^weddings\/[a-f0-9-]{36}\/(?:(?:venues\/(?:ceremony|reception)\/)|(?:gifts|hero|mirror)\/)[a-f0-9-]{36}\.(jpg|png|webp)$/.test(key)) return reply.code(404).send({error:'Imagem não encontrada.'});
   try {
     const image=await getImage(key);
     reply.header('content-type',image.ContentType||'application/octet-stream').header('cache-control',image.CacheControl||'public, max-age=31536000, immutable').header('x-content-type-options','nosniff');
@@ -183,7 +182,10 @@ app.post('/api/rsvp', { config: { rateLimit: { max: 5, timeWindow: '15 minutes' 
   const schedule=await req.db.query("SELECT value->>'rsvpDeadline' AS deadline FROM site_settings WHERE key='event_schedule'");
   const today=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Fortaleza',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
   if(schedule.rows[0]?.deadline&&today>schedule.rows[0].deadline)return reply.code(409).send({error:'O prazo para confirmar presença foi encerrado.'});
-  const result = await req.db.query('INSERT INTO guests(name,whatsapp,companions,wedding_id) VALUES($1,$2,$3,$4) RETURNING id,name,companions,created_at', [name.trim(),whatsapp.trim(),companions,req.weddingId]);
+  await req.db.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`rsvp:${req.weddingId}:${normalizeBrazilianPhone(whatsapp)}:${normalizeGuestName(name)}`]);
+  const existing=await req.db.query('SELECT id,name,whatsapp FROM guests WHERE wedding_id=$1 FOR UPDATE',[req.weddingId]);
+  const match=existing.rows.find(row=>normalizeBrazilianPhone(row.whatsapp)===normalizeBrazilianPhone(whatsapp)&&normalizeGuestName(row.name)===normalizeGuestName(name));
+  const result = match ? await req.db.query('UPDATE guests SET name=$1,whatsapp=$2,companions=$3,is_confirmed=true WHERE id=$4 RETURNING id,name,companions,created_at',[name.trim(),whatsapp.trim(),companions,match.id]) : await req.db.query('INSERT INTO guests(name,whatsapp,companions,wedding_id,is_confirmed) VALUES($1,$2,$3,$4,true) RETURNING id,name,companions,created_at', [name.trim(),whatsapp.trim(),companions,req.weddingId]);
   let notificationSent = false;
   try { notificationSent = await sendRsvpConfirmation({ name: name.trim(), whatsapp: whatsapp.trim(), companions }); }
   catch (error) { req.log.warn({ err: error }, 'RSVP salvo; não foi possível enviar a confirmação por WhatsApp.'); }
@@ -194,7 +196,7 @@ app.post('/api/memories/dedication', { config: { rateLimit: { max: 5, timeWindow
   if (typeof guestId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(guestId) || !text(message, 1000) || !isoDate(writtenAt)) {
     return reply.code(400).send({ error: 'Informe uma frase para a Penseira e a data em que foi escrita.' });
   }
-  const guest = await req.db.query('SELECT name FROM guests WHERE id=$1 AND wedding_id=$2', [guestId, req.weddingId]);
+  const guest = await req.db.query('SELECT name FROM guests WHERE id=$1 AND wedding_id=$2 AND is_confirmed=true', [guestId, req.weddingId]);
   if (!guest.rowCount) return reply.code(404).send({ error: 'Não encontramos a confirmação de presença associada. Confirme sua presença antes de enviar a dedicatória.' });
   const createdAt = new Date(`${writtenAt}T12:00:00-03:00`);
   const result = await req.db.query("INSERT INTO memories(sender_name,whatsapp,gift_title,gift_amount,message,created_at,wedding_id) VALUES($1,'','Dedicatória',0,$2,$3,$4) RETURNING id,sender_name,gift_title,gift_amount,message,created_at", [guest.rows[0].name, message.trim(), createdAt, req.weddingId]);
@@ -206,19 +208,19 @@ app.post('/api/memories', { config: { rateLimit: { max: 5, timeWindow: '15 minut
   const paymentConfig=await req.db.query('SELECT is_active FROM payment_integrations WHERE wedding_id=$1',[req.weddingId]);
   if(paymentConfig.rows[0]?.is_active)return reply.code(409).send({error:'Este casamento recebe presentes pelo checkout seguro. Escolha o presente e use o botão de pagamento.'});
   const db=req.db;let result;
-  try{
+  {
     const gift=await db.query('SELECT id,title,price,is_gifted FROM gifts WHERE id=$1 FOR UPDATE',[giftId]);
     if(!gift.rowCount)return reply.code(404).send({error:'Presente não encontrado.'})
     if(gift.rows[0].is_gifted)return reply.code(409).send({error:'Este presente já foi confirmado por outra pessoa. Escolha outro item.'})
     if(message.trim()){
-      const confirmed=await db.query('SELECT 1 FROM guests WHERE lower(name)=lower($1) LIMIT 1',[senderName.trim()]);
+      const confirmed=await db.query('SELECT 1 FROM guests WHERE is_confirmed=true AND lower(name)=lower($1) LIMIT 1',[senderName.trim()]);
       if(!confirmed.rowCount)return reply.code(400).send({error:'Confirme a presença antes de enviar uma dedicatória. A dedicatória é opcional.'})
     }
     await db.query('UPDATE gifts SET is_gifted=true,gifted_by=$2 WHERE id=$1',[giftId,senderName.trim()]);
     if(message.trim()){
       result=await db.query('INSERT INTO memories(gift_id,sender_name,whatsapp,gift_title,gift_amount,message,wedding_id) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id,sender_name,gift_title,gift_amount,message,created_at',[giftId,senderName.trim(),whatsapp.trim(),gift.rows[0].title,gift.rows[0].price,message.trim(),req.weddingId]);
     }
-  }catch(error){throw error}
+  }
   return reply.code(201).send({ memory:result?memoryOut(result.rows[0]):null });
 });
 app.post('/api/admin/memories', { preHandler: requireAdmin }, async (req,reply)=>{
@@ -376,7 +378,7 @@ app.post('/api/payments/checkout', { config:{rateLimit:{max:5,timeWindow:'15 min
   const active=await req.db.query("SELECT id FROM gift_payments WHERE wedding_id=$1 AND gift_id=$2 AND status IN ('CREATING','PENDING') LIMIT 1",[req.weddingId,giftId]);
   if(active.rowCount)return reply.code(409).send({error:'Este presente já está reservado em um checkout em andamento. Tente novamente quando a reserva expirar.'});
   const normalizedPhone=normalizeBrazilianPhone(whatsapp);
-  const registeredGuests=await req.db.query('SELECT id,name,whatsapp FROM guests WHERE wedding_id=$1',[req.weddingId]);
+  const registeredGuests=await req.db.query('SELECT id,name,whatsapp FROM guests WHERE wedding_id=$1 AND is_confirmed=true',[req.weddingId]);
   const guest=registeredGuests.rows.find(row=>normalizeBrazilianPhone(row.whatsapp)===normalizedPhone&&normalizeGuestName(row.name)===normalizeGuestName(senderName));
   if(!guest)return reply.code(403).send({error:'Não encontramos uma confirmação com esse WhatsApp e nome. Use os mesmos dados informados no RSVP; acentos, espaços e pontuação no nome não precisam ser idênticos.'});
   const inserted=await req.db.query(`INSERT INTO gift_payments(wedding_id,gift_id,gift_title,guest_id,sender_name,whatsapp,dedication,amount,status,expires_at)
@@ -442,7 +444,7 @@ app.post('/api/webhooks/asaas/:weddingId', { config:{rateLimit:{max:120,timeWind
 app.get('/api/admin/data', { preHandler: requireAdmin }, async (req) => {
   const [memories, guests, suppliers, gifts, settings] = await Promise.all([req.db.query('SELECT * FROM memories ORDER BY created_at DESC'), req.db.query('SELECT * FROM guests ORDER BY created_at DESC'), req.db.query('SELECT * FROM suppliers ORDER BY name'),req.db.query('SELECT * FROM gifts ORDER BY category,title'),req.db.query("SELECT key,value FROM site_settings WHERE key IN ('venue_ceremony','venue_reception','story_content','event_schedule','design_theme') ORDER BY key")]);
   const values=Object.fromEntries(settings.rows.map(r=>[r.key,r.value]));
-  return { wedding:{slug:req.weddingSlug,title:req.weddingTitle}, memories: memories.rows.map(r => ({ ...memoryOut(r), whatsapp:r.whatsapp, isVisible:r.is_visible })), guests: guests.rows.map(r => ({ ...guestOut(r), whatsapp:r.whatsapp, isVisible:r.is_visible })), suppliers: suppliers.rows.map(r => ({ id:r.id,name:r.name,role:r.role,contact:r.contact,cost:Number(r.cost),paidAmount:Number(r.paid_amount),status:r.status,isVisible:r.is_visible })), gifts:gifts.rows.map(giftOut), venues: ['venue_ceremony','venue_reception'].map(k=>values[k]).filter(Boolean), story:values.story_content||null, event:values.event_schedule||null, design:values.design_theme||null };
+  return { wedding:{slug:req.weddingSlug,title:req.weddingTitle}, memories: memories.rows.map(r => ({ ...memoryOut(r), whatsapp:r.whatsapp, isVisible:r.is_visible })), guests: guests.rows.map(r => ({ ...guestOut(r), whatsapp:r.whatsapp, isVisible:r.is_visible, isConfirmed:r.is_confirmed })), suppliers: suppliers.rows.map(r => ({ id:r.id,name:r.name,role:r.role,contact:r.contact,cost:Number(r.cost),paidAmount:Number(r.paid_amount),status:r.status,isVisible:r.is_visible })), gifts:gifts.rows.map(giftOut), venues: ['venue_ceremony','venue_reception'].map(k=>values[k]).filter(Boolean), story:values.story_content||null, event:values.event_schedule||null, design:values.design_theme||null };
 });
 app.patch('/api/admin/slug', { preHandler: requireAdmin }, async (req, reply) => {
   const { slug } = req.body || {};
@@ -518,13 +520,13 @@ app.patch('/api/admin/gifts/:giftId', { preHandler: requireAdmin }, async (req,r
 });
 app.delete('/api/admin/gifts/:giftId', { preHandler: requireAdmin }, async (req,reply)=>{
   const db=req.db;let imageKey;
-  try{
+  {
     const gift=await db.query('SELECT image_key,is_gifted,(SELECT count(*)::int FROM gift_payments p WHERE p.wedding_id=$2 AND p.gift_id=gifts.id) AS payment_count FROM gifts WHERE id=$1 FOR UPDATE',[req.params.giftId,req.weddingId]);
     if(!gift.rowCount)return reply.code(404).send({error:'Presente não encontrado.'})
     if(gift.rows[0].is_gifted)return reply.code(409).send({error:'Este presente já foi confirmado e não pode ser removido da lista.'})
     if(gift.rows[0].payment_count)return reply.code(409).send({error:'Este presente tem histórico de checkout e não pode ser removido. Mantenha-o na lista para preservar a auditoria dos pagamentos.'})
     imageKey=gift.rows[0].image_key;await db.query('DELETE FROM gifts WHERE id=$1',[req.params.giftId]);
-  }catch(error){throw error}
+  }
   if(imageKey)await deleteImage(imageKey).catch(error=>req.log.warn({err:error},'A imagem do presente permaneceu no armazenamento.'));
   return {ok:true};
 });
@@ -583,13 +585,21 @@ app.patch('/api/admin/:kind/:id', { preHandler: requireAdmin }, async (req, repl
   if (!['memories','guests','suppliers'].includes(kind)) return reply.code(404).send({ error:'Registro não encontrado.' });
   const specs = {
     memories: { table:'memories', fields:{ senderName:['sender_name', v=>text(v,120)], message:['message', v=>typeof v==='string'&&v.length<=1000], isVisible:['is_visible',v=>typeof v==='boolean'] } },
-    guests: { table:'guests', fields:{ name:['name',v=>text(v,120)], companions:['companions',v=>Number.isInteger(v)&&v>=0&&v<=4], isVisible:['is_visible',v=>typeof v==='boolean'] } },
+    guests: { table:'guests', fields:{ name:['name',v=>text(v,120)], whatsapp:['whatsapp',phone], isConfirmed:['is_confirmed',v=>typeof v==='boolean'], companions:['companions',v=>Number.isInteger(v)&&v>=0&&v<=4], isVisible:['is_visible',v=>typeof v==='boolean'] } },
     suppliers: { table:'suppliers', fields:{ name:['name',v=>text(v,120)], role:['role',v=>text(v,180)], contact:['contact',v=>typeof v==='string'&&v.length<=80], cost:['cost',money], paidAmount:['paid_amount',money], status:['status',v=>['Contratado','Em Negociação','Quitado'].includes(v)], isVisible:['is_visible',v=>typeof v==='boolean'] } }
   };
   const spec=specs[kind]; const entries=Object.entries(b).filter(([key])=>spec.fields[key]);
   if (!entries.length || entries.some(([key,value])=>!spec.fields[key][1](value))) return reply.code(400).send({ error:'Dados inválidos.' });
+  if(kind==='guests'&&(b.name!==undefined||b.whatsapp!==undefined)){
+    const current=await req.db.query('SELECT name,whatsapp FROM guests WHERE id=$1',[id]);
+    if(!current.rowCount)return reply.code(404).send({error:'Registro não encontrado.'});
+    const name=b.name??current.rows[0].name,whatsapp=b.whatsapp??current.rows[0].whatsapp;
+    await req.db.query("SELECT pg_advisory_xact_lock(hashtext($1))",[`rsvp:${req.weddingId}:${normalizeBrazilianPhone(whatsapp)}:${normalizeGuestName(name)}`]);
+    const others=await req.db.query('SELECT name,whatsapp FROM guests WHERE id<>$1',[id]);
+    if(others.rows.some(row=>normalizeBrazilianPhone(row.whatsapp)===normalizeBrazilianPhone(whatsapp)&&normalizeGuestName(row.name)===normalizeGuestName(name)))return reply.code(409).send({error:'Já existe um convidado com este nome e WhatsApp.'});
+  }
   const setters=entries.map(([key],i)=>`${spec.fields[key][0]}=$${i+1}`);
-  const result=await req.db.query(`UPDATE ${spec.table} SET ${setters.join(',')} WHERE id=$${entries.length+1} RETURNING id`, [...entries.map(([key,value])=>value),id]);
+  const result=await req.db.query(`UPDATE ${spec.table} SET ${setters.join(',')} WHERE id=$${entries.length+1} RETURNING id`, [...entries.map(([,value])=>value),id]);
   return result.rowCount ? {ok:true} : reply.code(404).send({error:'Registro não encontrado.'});
 });
 app.delete('/api/admin/:kind/:id', { preHandler: requireAdmin }, async (req, reply) => {
@@ -598,6 +608,29 @@ app.delete('/api/admin/:kind/:id', { preHandler: requireAdmin }, async (req, rep
   if(req.params.kind==='guests'){const payments=await req.db.query('SELECT 1 FROM gift_payments WHERE wedding_id=$1 AND guest_id=$2 LIMIT 1',[req.weddingId,req.params.id]);if(payments.rowCount)return reply.code(409).send({error:'Este convidado possui histórico de pagamento e não pode ser removido.'})}
   const result=await req.db.query(`DELETE FROM ${table} WHERE id=$1`,[req.params.id]);
   return result.rowCount ? {ok:true} : reply.code(404).send({error:'Registro não encontrado.'});
+});
+app.post('/api/admin/guests', { preHandler: requireAdmin }, async (req,reply)=>{
+  const {name,whatsapp,isConfirmed=false}=req.body||{};
+  if(!text(name,120)||!phone(whatsapp)||typeof isConfirmed!=='boolean')return reply.code(400).send({error:'Informe nome, WhatsApp e status válidos.'});
+  await req.db.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`rsvp:${req.weddingId}:${normalizeBrazilianPhone(whatsapp)}:${normalizeGuestName(name)}`]);
+  const existing=await req.db.query('SELECT name,whatsapp FROM guests WHERE wedding_id=$1',[req.weddingId]);
+  if(existing.rows.some(row=>normalizeBrazilianPhone(row.whatsapp)===normalizeBrazilianPhone(whatsapp)&&normalizeGuestName(row.name)===normalizeGuestName(name)))return reply.code(409).send({error:'Este convidado já está cadastrado.'});
+  const result=await req.db.query('INSERT INTO guests(name,whatsapp,is_confirmed,wedding_id) VALUES($1,$2,$3,$4) RETURNING id',[name.trim(),whatsapp.trim(),isConfirmed,req.weddingId]);
+  return reply.code(201).send({id:result.rows[0].id});
+});
+app.post('/api/admin/photos', {preHandler:requireAdmin,bodyLimit:5*1024*1024+64*1024}, async(req,reply)=>{
+  if(!isStorageConfigured())return reply.code(503).send({error:'Armazenamento de imagens não configurado.'});
+  const part=await req.file();if(!part)return reply.code(400).send({error:'Selecione uma imagem.'});
+  const buffer=await part.toBuffer(),format=imageFormat(buffer);if(!format)return reply.code(400).send({error:'Selecione uma imagem JPG, PNG ou WebP válida.'});
+  const id=randomUUID(),key=`weddings/${req.weddingId}/mirror/${id}.${format.ext}`;await putImage(key,buffer,format.type);
+  try{await req.db.query('INSERT INTO mirror_photos(id,wedding_id,image_key,position) VALUES($1,$2,$3,COALESCE((SELECT max(position)+1 FROM mirror_photos),0))',[id,req.weddingId,key])}catch(error){await deleteImage(key).catch(()=>{});throw error}
+  return reply.code(201).send({id});
+});
+app.delete('/api/admin/photos/:id', {preHandler:requireAdmin}, async(req,reply)=>{
+  const result=await req.db.query('DELETE FROM mirror_photos WHERE id=$1 RETURNING image_key',[req.params.id]);
+  if(!result.rowCount)return reply.code(404).send({error:'Foto não encontrada.'});
+  await deleteImage(result.rows[0].image_key).catch(error=>req.log.warn({err:error},'Foto permaneceu no armazenamento.'));
+  return {ok:true};
 });
 app.post('/api/admin/suppliers', { preHandler: requireAdmin }, async (req,reply)=>{
   const {name,role,cost=0,contact=''}=req.body||{};
@@ -623,7 +656,7 @@ app.setErrorHandler((error,req,reply)=>{ req.log.error(error); const code=error.
 async function start() {
   if (!process.env.DATABASE_URL || !process.env.ADMIN_PASSWORD || process.env.ADMIN_PASSWORD.length < 14 || !process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 32) throw new Error('Configure DATABASE_URL, ADMIN_PASSWORD (mínimo de 14 caracteres) e SESSION_SECRET (mínimo de 32 caracteres).');
   if (process.env.APP_URL) { const appUrl = new URL(process.env.APP_URL); if (!['http:', 'https:'].includes(appUrl.protocol)) throw new Error('APP_URL deve usar http ou https.'); }
-  await seed(); if(isStorageConfigured())await ensureBucket(); await live.connect(); await live.query('LISTEN wedding_changes');
+  await seed(); await ensureStorage(); await live.connect(); await live.query('LISTEN wedding_changes');
   await app.listen({host:process.env.HOST||'127.0.0.1',port:Number(process.env.PORT)||3000});
 }
 let shuttingDown=false;

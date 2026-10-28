@@ -44,10 +44,7 @@ ADMIN_PASSWORD=SENHA_FORTE_DO_PAINEL
 SESSION_SECRET=SEGREDO_ALEATORIO_COM_PELO_MENOS_32_CARACTERES
 EVOLUTION_API_URL=https://evolutionapi.c2net.com.br/message/sendText/cpu
 EVOLUTION_API_KEY=CHAVE_DA_EVOLUTION_API
-MINIO_SERVER_URL=https://SEU_ENDPOINT_S3
-MINIO_ROOT_USER=USUARIO_MINIO
-MINIO_ROOT_PASSWORD=SENHA_MINIO
-MINIO_BUCKET=suzy-junior-wedding
+STORAGE_DIR=/data/uploads
 PAYMENTS_ENCRYPTION_KEY=SEGREDO_HEXADECIMAL_DE_64_CARACTERES
 ```
 
@@ -59,7 +56,26 @@ Use no `DATABASE_URL` a senha gerada para `suzy_junior_app` e o hostname/porta a
 
 Confira na área **Network/Networking** do serviço PostgreSQL externo que conexões originadas do VPS/EasyPanel podem alcançar o host e a porta configurados. Não abra a porta do PostgreSQL para toda a internet; prefira a rede privada ou libere somente o IP de saída do VPS.
 
-## 5. Associar domínio e HTTPS
+## 5. Preparar o volume das fotos
+
+Antes de atualizar um serviço existente, confirme se há imagens no armazenamento anterior. Faça backup do banco e dos arquivos, e copie os arquivos existentes para o novo volume mantendo integralmente os caminhos relativos (como `weddings/<id>/gifts/<id>.jpg` e caminhos antigos `gifts/` ou `venues/`). Confira a quantidade e a leitura dos arquivos antes de desligar a origem antiga. A troca de configuração não copia os arquivos automaticamente. Para imagens públicas expostas pela API do site antigo, o comando abaixo importa cada arquivo mantendo o caminho e verifica colisões. Execute-o em um contêiner com o novo volume montado, apontando para o site antigo ainda ativo, uma vez por slug:
+
+```sh
+STORAGE_DIR=/data/uploads NODE_ENV=production node scripts/import-public-images.js https://casamento-suzy-e-junior.c2net.com.br suzy-e-junior
+```
+
+O comando não lista arquivos que não estejam expostos na API pública: confira também o backup completo antes de encerrar a origem antiga.
+
+1. No serviço **App**, abra **Storage** e adicione um mount do tipo **Volume**, com caminho no contêiner `/data/uploads`. Use um nome exclusivo para este serviço se o painel solicitar um nome.
+2. Em **Environment**, adicione `STORAGE_DIR=/data/uploads`, preservando todas as outras variáveis e credenciais existentes.
+3. O processo roda como usuário `node` (UID 1000). O volume deve permitir leitura e escrita a esse usuário; confirme as permissões com o administrador do servidor se a inicialização acusar erro de acesso. Não use permissões abertas a todos.
+4. Configure uma única réplica no serviço ou use armazenamento compartilhado entre réplicas. O volume local de um servidor não deve ser presumido compartilhado entre nós diferentes.
+5. Após disponibilizar a versão nova e copiar as fotos existentes, faça o deploy e teste o upload, a abertura e exclusão de uma foto; reinicie o serviço e confirme que uma foto mantida continua acessível.
+6. Configure e teste o backup do volume em **Storage → Volume Backups**, além do backup do PostgreSQL. O backup do volume é uma sincronização espelhada: configure versionamento no destino se precisar recuperar arquivos apagados.
+
+O serviço recusa iniciar em produção se `/data/uploads` não estiver montado como volume ou não for gravável. Salvar o mount no painel não atualiza o contêiner até o deploy. Consulte [App Service](https://easypanel.io/docs/services/app) e [Volume Backups](https://easypanel.io/docs/backups/volumes).
+
+## 6. Associar domínio e HTTPS
 
 1. No serviço App, abra **Domains** e adicione `casamento-suzy-e-junior.c2net.com.br`.
 2. Configure o protocolo de destino como HTTP e a porta de destino como `3000`.
@@ -68,7 +84,7 @@ Confira na área **Network/Networking** do serviço PostgreSQL externo que conex
 
 O domínio do serviço encaminha tráfego HTTP pela proxy do EasyPanel para a porta interna definida. Veja os passos atuais de domínio em [App Service → Domains](https://easypanel.io/docs/services/app).
 
-## 6. Fazer o primeiro deploy e verificar
+## 7. Fazer o primeiro deploy e verificar
 
 1. Salve fonte, build, environment e domínio.
 2. Clique **Deploy** e acompanhe os logs de build e de runtime.
@@ -78,9 +94,9 @@ O domínio do serviço encaminha tráfego HTTP pela proxy do EasyPanel para a po
 6. Faça login no **Painel dos Noivos**, confira fornecedores e convidados e confirme que as atualizações realtime aparecem após criar ou alterar registros.
 7. Confirme no navegador que o certificado é válido e que a página principal redireciona/abre em HTTPS.
 
-A primeira inicialização cria as tabelas e carrega os dados de demonstração de `modelo/` quando a tabela de presentes está vazia. Antes de usar com convidados reais, revise e remova os registros demonstrativos no banco/painel.
+A primeira inicialização cria as tabelas e, se necessário, carrega a lista inicial de presentes. Convidados, dedicatórias e fornecedores são cadastrados pelos usuários.
 
-## 7. Atualizações seguintes
+## 8. Atualizações seguintes
 
 1. Faça alterações e testes localmente.
 2. Envie commits aprovados para `main` no GitHub.
@@ -88,7 +104,7 @@ A primeira inicialização cria as tabelas e carrega os dados de demonstração 
 4. Acompanhe o build e faça uma checagem de `/api/health` e do RSVP após a publicação.
 5. Guarde as variáveis do painel em um cofre seguro. Gere uma nova `SESSION_SECRET` ou senha somente quando for necessário rotacioná-las; a troca de `SESSION_SECRET` encerra as sessões administrativas atuais.
 
-## 8. Diagnóstico rápido
+## 9. Diagnóstico rápido
 
 - **Build falha no `npm ci`:** confira se `package-lock.json` foi enviado junto com `package.json` e force um novo build sem cache.
 - **Container reinicia ou falha em `/api/health`:** confira `DATABASE_URL`, DNS/rede do PostgreSQL e permissões da role `suzy_junior_app`.

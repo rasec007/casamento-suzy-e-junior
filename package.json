@@ -10,11 +10,11 @@
     "dev": "node --watch server/index.js",
     "start": "node server/index.js",
     "db:migrate": "node server/migrate.js",
-    "check": "node --check server/index.js && node --check server/guest-match.js && node --check server/evolution.js && node --check server/asaas.js && node --check server/storage.js && node --check public/app.js && node --check public/toast.js && node --check public/not-found.js && node --check server/migrate.js && node --check test/run.js && node --check test/evolution.test.js && node --check test/asaas.test.js && node --check test/guest-match.test.js",
-    "test": "node test/run.js"
+    "check": "node --check server/index.js && node --check server/guest-match.js && node --check server/evolution.js && node --check server/asaas.js && node --check server/storage.js && node --check scripts/import-public-images.js && node --check test/storage.test.js && node --check public/app.js && node --check public/toast.js && node --check public/not-found.js && node --check server/migrate.js && node --check test/run.js && node --check test/evolution.test.js && node --check test/asaas.test.js && node --check test/guest-match.test.js",
+    "test": "node test/run.js",
+    "lint": "eslint ."
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.1146.0",
     "@fastify/cookie": "^11.0.2",
     "@fastify/helmet": "^13.0.1",
     "@fastify/multipart": "^10.1.2",
@@ -23,5 +23,9 @@
     "dotenv": "^16.4.7",
     "fastify": "^5.2.1",
     "pg": "^8.13.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.13.0"
   }
 }

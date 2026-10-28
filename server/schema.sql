@@ -31,6 +31,12 @@ CREATE TABLE IF NOT EXISTS guests (
   whatsapp varchar(24) NOT NULL, companions smallint NOT NULL DEFAULT 0 CHECK (companions BETWEEN 0 AND 4),
   is_visible boolean NOT NULL DEFAULT true, created_at timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE guests ADD COLUMN IF NOT EXISTS is_confirmed boolean NOT NULL DEFAULT true;
+ALTER TABLE guests ALTER COLUMN is_confirmed SET DEFAULT false;
+CREATE TABLE IF NOT EXISTS mirror_photos (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), wedding_id uuid NOT NULL REFERENCES weddings(id) ON DELETE CASCADE,
+  image_key text NOT NULL, position integer NOT NULL DEFAULT 0, created_at timestamptz NOT NULL DEFAULT now()
+);
 CREATE TABLE IF NOT EXISTS suppliers (
   id text PRIMARY KEY DEFAULT gen_random_uuid()::text, name varchar(120) NOT NULL,
   role varchar(180) NOT NULL, contact varchar(80) NOT NULL DEFAULT '',
@@ -121,7 +127,7 @@ INSERT INTO site_settings(wedding_id,key,value) SELECT w.id,v.key,v.value::jsonb
 ('design_theme', '{"preset":"dourado-classico","colors":{"background":"#0a0d14","panel":"#101520","text":"#ebebeb","accent":"#c0a062","button":"#c0a062","buttonHover":"#d4b475","buttonText":"#0a0d14"},"fonts":{"heading":"Cinzel","body":"Montserrat"},"heroImage":"/images/hero_wedding_hall_1791245517448.jpg","heroImageKey":""}')
 ) AS v(key,value) WHERE w.slug='suzy-e-junior' ON CONFLICT(wedding_id,key) DO NOTHING;
 DO $$ DECLARE tbl text; BEGIN
-    FOREACH tbl IN ARRAY ARRAY['gifts','memories','guests','suppliers','site_settings','admin_users','payment_integrations','gift_payments','asaas_webhook_events'] LOOP
+    FOREACH tbl IN ARRAY ARRAY['gifts','memories','guests','suppliers','site_settings','admin_users','payment_integrations','gift_payments','asaas_webhook_events','mirror_photos'] LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', tbl);
     EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', tbl);
     EXECUTE format('DROP POLICY IF EXISTS wedding_isolation ON %I', tbl);
@@ -151,3 +157,7 @@ DROP TRIGGER IF EXISTS gifts_notify ON gifts;
 CREATE TRIGGER gifts_notify AFTER INSERT OR UPDATE OR DELETE ON gifts FOR EACH ROW EXECUTE FUNCTION notify_wedding_change();
 DROP TRIGGER IF EXISTS gift_payments_notify ON gift_payments;
 CREATE TRIGGER gift_payments_notify AFTER INSERT OR UPDATE OR DELETE ON gift_payments FOR EACH ROW EXECUTE FUNCTION notify_wedding_change();
+
+CREATE INDEX IF NOT EXISTS mirror_photos_tenant_order_idx ON mirror_photos(wedding_id,position,created_at);
+DROP TRIGGER IF EXISTS mirror_photos_notify ON mirror_photos;
+CREATE TRIGGER mirror_photos_notify AFTER INSERT OR UPDATE OR DELETE ON mirror_photos FOR EACH ROW EXECUTE FUNCTION notify_wedding_change();
