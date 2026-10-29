@@ -14,7 +14,7 @@ import { promisify } from 'node:util';
 import { INITIAL_GIFTS, INITIAL_MEMORIES, INITIAL_GUESTS, INITIAL_SUPPLIERS } from './seed-data.js';
 import { sendRsvpConfirmation } from './evolution.js';
 import { normalizeBrazilianPhone, normalizeGuestName } from './guest-match.js';
-import { asaasCheckoutUrl, asaasRequest, decryptSecret, encryptSecret, hashWebhookToken, secureTokenMatches } from './asaas.js';
+import { asaasCheckoutUrl, asaasRequest, checkoutItem, decryptSecret, encryptSecret, hashWebhookToken, secureTokenMatches } from './asaas.js';
 import { isStorageConfigured, ensureStorage, putImage, getImage, deleteImage, closeStorage } from './storage.js';
 
 const root = dirname(fileURLToPath(import.meta.url));
@@ -386,7 +386,7 @@ app.post('/api/payments/checkout', { config:{rateLimit:{max:5,timeWindow:'15 min
   const paymentId=inserted.rows[0].id;
   const baseUrl=process.env.NODE_ENV==='production'&&process.env.APP_URL?process.env.APP_URL.replace(/\/$/,''):`${req.protocol}://${req.headers.host}`;
   const callback=`${baseUrl}/casamento/${encodeURIComponent(req.weddingSlug)}?pagamento=`;
-  const payload={billingTypes:['PIX','CREDIT_CARD'],chargeTypes:['DETACHED'],minutesToExpire:60,externalReference:paymentId,callback:{successUrl:`${callback}sucesso#presentes`,cancelUrl:`${callback}cancelado#presentes`,expiredUrl:`${callback}expirado#presentes`},items:[{externalReference:gift.id,name:gift.title,description:`Presente de casamento para ${req.weddingTitle}`,quantity:1,value:Number(gift.price)}],customerData:{name:senderName.trim(),phone:normalizedPhone,...(email.trim()?{email:email.trim()}:{} )}};
+  const payload={billingTypes:['PIX','CREDIT_CARD'],chargeTypes:['DETACHED'],minutesToExpire:60,externalReference:paymentId,callback:{successUrl:`${callback}sucesso#presentes`,cancelUrl:`${callback}cancelado#presentes`,expiredUrl:`${callback}expirado#presentes`},items:[checkoutItem(gift)]};
   try{
     const apiKey=decryptSecret(config.rows[0].api_key_cipher),checkout=await asaasRequest(config.rows[0].environment,apiKey,'/checkouts',{method:'POST',body:payload});
     const checkoutUrl=asaasCheckoutUrl(config.rows[0].environment,checkout);

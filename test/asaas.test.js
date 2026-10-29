@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { asaasCheckoutUrl, asaasRequest, decryptSecret, encryptSecret, secureTokenMatches, hashWebhookToken } from '../server/asaas.js';
+import { asaasCheckoutUrl, asaasRequest, checkoutItem, decryptSecret, encryptSecret, secureTokenMatches, hashWebhookToken } from '../server/asaas.js';
 
 const withEncryptionKey = async callback => {
   const previous = process.env.PAYMENTS_ENCRYPTION_KEY;
@@ -50,4 +50,13 @@ test('surfaces Asaas validation errors without exposing credentials', async () =
   await assert.rejects(asaasRequest('production','private-key','/myAccount',{
     fetchImpl:async()=>({ok:false,status:401,json:async()=>({errors:[{description:'Chave inválida'}]})}),
   }),error=>error.message==='Asaas: Chave inválida'&&!error.message.includes('private-key'));
+});
+
+test('limits the checkout item name while preserving the full title and amount', () => {
+  const title = 'Um presente muito especial para os noivos';
+  const item = checkoutItem({id:'gift-1',title,price:'123.45'});
+  assert.equal(Array.from(item.name).length,30);
+  assert.equal(item.description,title);
+  assert.equal(item.value,123.45);
+  assert.equal(checkoutItem({id:'2',title:'Café',price:1}).name,'Café');
 });

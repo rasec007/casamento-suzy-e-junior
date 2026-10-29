@@ -6,6 +6,11 @@ const endpoints = {
 };
 const checkoutHosts = { sandbox: 'sandbox.asaas.com', production: 'asaas.com' };
 
+// Preserve the full title in the description while respecting the gateway item-name limit.
+export function checkoutItem(gift) {
+  return { externalReference: gift.id, name: Array.from(gift.title).slice(0, 30).join('').trimEnd(), description: gift.title, quantity: 1, value: Number(gift.price) };
+}
+
 export function asaasCheckoutUrl(environment, checkout) {
   const host = checkoutHosts[environment];
   if (!host || !checkout || typeof checkout.id !== 'string' || !/^[a-z\d-]{1,80}$/i.test(checkout.id)) {
