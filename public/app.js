@@ -41,13 +41,12 @@ function renderStory(){
   $('#story-question').textContent=story.question;$('#story-answer').textContent=story.answer;
 }
 function renderEvent(){
-  if(!state.event)return;const {eventDate,eventTime,rsvpDeadline}=state.event;
+  if(!state.event)return;const {eventDate,eventTime}=state.event;
   targetDate=new Date(`${eventDate}T${eventTime}:00-03:00`);
-  const localDate=date=>new Date(`${date}T12:00:00-03:00`), dateText=localDate(eventDate).toLocaleDateString('pt-BR',{day:'2-digit',month:'long',year:'numeric',timeZone:'America/Fortaleza'}), deadlineText=localDate(rsvpDeadline).toLocaleDateString('pt-BR',{day:'2-digit',month:'long',year:'numeric',timeZone:'America/Fortaleza'});
+  const localDate=date=>new Date(`${date}T12:00:00-03:00`), dateText=localDate(eventDate).toLocaleDateString('pt-BR',{day:'2-digit',month:'long',year:'numeric',timeZone:'America/Fortaleza'});
   $('#event-date').textContent=`${dateText} • ${eventTime.replace(':','h')} • Fortaleza / CE`;
   $('#footer-event-date').textContent=`${dateText} • FORTALEZA, CEARÁ`.toLocaleUpperCase('pt-BR');
-  $('#rsvp-deadline').textContent=deadlineText;const today=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Fortaleza',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date()),closed=today>rsvpDeadline,form=$('#rsvp-form');
-  [...form.elements].forEach(element=>{element.disabled=closed});if(closed)$('.form-status',form).textContent='O prazo para confirmar presença foi encerrado.';updateCountdown();
+  updateCountdown();
 }
 function renderGifts(){
   const available=[...new Set([...categories,...state.gifts.map(gift=>gift.category)])];
@@ -157,9 +156,6 @@ $('#gift-dialog').addEventListener('submit',async event=>{
   const dedication=event.target.closest('#dedication-form');if(!dedication)return;event.preventDefault();const status=$('.form-status',dedication),data=Object.fromEntries(new FormData(dedication));
   try{await api('/api/admin/memories',{method:'POST',body:JSON.stringify(data)});$('#gift-dialog').close();await loadSite();state.adminTab='presentes';await loadAdmin();notify('Dedicatória adicionada à Penseira.')}catch(error){status.textContent=error.message}
 });
-$('#rsvp-form').addEventListener('submit',async event=>{event.preventDefault();const form=event.currentTarget,status=$('.form-status',form),button=$('button[type="submit"]',form);button.disabled=true;status.textContent='';try{const data=Object.fromEntries(new FormData(form));data.companions=Number(data.companions);const result=await api('/api/rsvp',{method:'POST',body:JSON.stringify(data)});const name=data.name;$('#rsvp-dedication-form [name="guestId"]').value=result.guest.id;$('#rsvp-dedication-form [name="writtenAt"]').value=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Fortaleza',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());$('#rsvp-complete-status').textContent=`Presença de ${name} confirmada${result.notificationSent?' — enviamos a confirmação por WhatsApp.':'; não foi possível enviar o WhatsApp agora, mas o RSVP foi salvo.'}`;form.hidden=true;$('#rsvp-complete-status').hidden=false;$('#rsvp-dedication-panel').hidden=false;await loadSite()}catch(error){status.textContent=error.message;notify(error.message,'error')}finally{button.disabled=false}});
-$('#rsvp-dedication-form').addEventListener('submit',async event=>{event.preventDefault();const form=event.currentTarget,status=$('.form-status',form),button=$('button[type="submit"]',form);button.disabled=true;status.textContent='';try{const data=Object.fromEntries(new FormData(form));await api('/api/memories/dedication',{method:'POST',body:JSON.stringify(data)});$('#rsvp-complete-status').textContent='Sua presença está confirmada e sua dedicatória foi guardada na Penseira. A lista de presentes está logo abaixo.';$('#rsvp-dedication-panel').hidden=true;await loadSite();document.querySelector('#presentes').scrollIntoView({behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth',block:'start'})}catch(error){status.textContent=error.message;notify(error.message,'error')}finally{button.disabled=false}});
-$('#skip-dedication').addEventListener('click',()=>{$('#rsvp-dedication-panel').hidden=true;$('#rsvp-complete-status').textContent='Presença confirmada. A lista de presentes está logo abaixo.';document.querySelector('#presentes').scrollIntoView({behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth',block:'start'})});
 $('#photo-prev').addEventListener('click',()=>{state.photoIndex=(state.photoIndex+state.photos.length-1)%state.photos.length;renderPhotos()});
 $('#photo-next').addEventListener('click',()=>{state.photoIndex=(state.photoIndex+1)%state.photos.length;renderPhotos()});
 setInterval(()=>{if(state.photos.length>1&&!document.hidden&&!matchMedia('(prefers-reduced-motion: reduce)').matches){state.photoIndex=(state.photoIndex+1)%state.photos.length;renderPhotos()}},6000);
