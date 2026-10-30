@@ -171,7 +171,7 @@ app.get('/api/theme.css', async(req,reply)=>{
 });
 app.get('/media/*', async (req, reply) => {
   const key=req.params['*'];
-  if(!/^(?:venues\/(?:ceremony|reception)|gifts)\/[a-f0-9-]{36}\.(jpg|png|webp)$/.test(key)&&!/^weddings\/[a-f0-9-]{36}\/(?:(?:venues\/(?:ceremony|reception)\/)|(?:gifts|hero|mirror)\/)[a-f0-9-]{36}\.(jpg|png|webp)$/.test(key)) return reply.code(404).send({error:'Imagem não encontrada.'});
+  if(!/^(?:venues\/(?:ceremony|reception)|gifts)\/[a-f0-9-]{36}\.(jpg|png|webp)$/.test(key)&&!/^weddings\/[a-f0-9-]{36}\/(?:(?:venues\/(?:ceremony|reception)\/)|(?:gifts|hero|mirror|invitation)\/)[a-f0-9-]{36}\.(jpg|png|webp)$/.test(key)) return reply.code(404).send({error:'Imagem não encontrada.'});
   try {
     const image=await getImage(key);
     reply.header('content-type',image.ContentType||'application/octet-stream').header('cache-control',image.CacheControl||'public, max-age=31536000, immutable').header('x-content-type-options','nosniff');
@@ -197,19 +197,39 @@ app.post('/api/invitation/confirm', { config:{rateLimit:{max:10,timeWindow:'15 m
   if(!result.rowCount)return reply.code(404).send({error:'Convite não encontrado.'});
   return {ok:true};
 });
-app.post('/api/admin/invitations/:id/send', {preHandler:requireAdmin,bodyLimit:5*1024*1024+65536}, async(req,reply)=>{
-  const part=await req.file();
-  if(!part)return reply.code(400).send({error:'Selecione a imagem do convite.'});
-  const buffer=await part.toBuffer(),format=imageFormat(buffer), message=part.fields.message?.value;
-  if(!format||!text(message,800))return reply.code(400).send({error:'Informe uma mensagem de até 800 caracteres e uma imagem JPG, PNG ou WebP.'});
+async function sendSavedInvitation(req, guest, template) {
+  if (!template?.imageKey || !template?.message) throw new Error('Salve o modelo do convite antes de enviar.');
+  const image=await getImage(template.imageKey),chunks=[];
+  for await (const chunk of image.Body) chunks.push(chunk);
+  const base=process.env.APP_URL||`${req.protocol}://${req.headers.host}`;
+  const link=`${base.replace(/\/$/,'')}/casamento/${req.weddingSlug}/confirmar#${guest.invite_token}`;
+  const caption=`${template.message.replaceAll('{nome}',guest.name)}\n\nConfirme sua presença: ${link}`;
+  if(caption.length>1024)throw new Error('A mensagem do convite ficou longa demais para este nome.');
+  await sendInvitation({whatsapp:guest.whatsapp,caption,image:Buffer.concat(chunks),mimeType:image.ContentType});
+}
+app.put('/api/admin/invitation-template', {preHandler:requireAdmin,bodyLimit:5*1024*1024+65536}, async(req,reply)=>{
+  let message,buffer,format;
+  for await (const part of req.parts()) {
+    if(part.type==='file') { buffer=await part.toBuffer(); if(buffer.length) format=imageFormat(buffer); }
+    else if(part.fieldname==='message') message=part.value;
+  }
+  if(!text(message,800))return reply.code(400).send({error:'Informe uma mensagem de até 800 caracteres.'});
+  if(buffer?.length&&!format)return reply.code(400).send({error:'Selecione uma imagem JPG, PNG ou WebP válida.'});
+  const current=await req.db.query("SELECT value FROM site_settings WHERE key='invitation_template'");
+  const oldKey=current.rows[0]?.value?.imageKey;
+  if(!format&&!oldKey)return reply.code(400).send({error:'Selecione a imagem do convite.'});
+  const key=format?`weddings/${req.weddingId}/invitation/${randomUUID()}.${format.ext}`:oldKey;
+  if(format)await putImage(key,buffer,format.type);
+  try { await req.db.query("INSERT INTO site_settings(wedding_id,key,value) VALUES($1,'invitation_template',$2::jsonb) ON CONFLICT(wedding_id,key) DO UPDATE SET value=EXCLUDED.value,updated_at=now()",[req.weddingId,JSON.stringify({message:message.trim(),imageKey:key})]); }
+  catch(error){if(format)await deleteImage(key).catch(()=>{});throw error;}
+  return {ok:true};
+});
+app.post('/api/admin/invitations/:id/send', {preHandler:requireAdmin}, async(req,reply)=>{
   const result=await req.db.query('SELECT name,whatsapp,invite_token FROM guests WHERE id::text=$1',[req.params.id]);
   if(!result.rowCount)return reply.code(404).send({error:'Convidado não encontrado.'});
-  const guest=result.rows[0],base=process.env.APP_URL||`${req.protocol}://${req.headers.host}`;
-  const link=`${base.replace(/\/$/,'')}/casamento/${req.weddingSlug}/confirmar#${guest.invite_token}`;
-  const caption=`${message.trim().replaceAll('{nome}',guest.name)}\n\nConfirme sua presença: ${link}`;
-  if(caption.length>1024)return reply.code(400).send({error:'A mensagem ficou longa demais após incluir o link.'});
-  try{await sendInvitation({whatsapp:guest.whatsapp,caption,image:buffer,mimeType:format.type});return {ok:true};}
-  catch(error){req.log.warn({err:error},'Falha ao enviar convite');return reply.code(502).send({error:'Não foi possível enviar o convite pelo WhatsApp. Verifique a conexão da EvolutionAPI.'});}
+  const settings=await req.db.query("SELECT value FROM site_settings WHERE key='invitation_template'");
+  try{await sendSavedInvitation(req,result.rows[0],settings.rows[0]?.value);return {ok:true};}
+  catch(error){req.log.warn({err:error},'Falha ao enviar convite');return reply.code(502).send({error:!settings.rowCount?'Salve o modelo do convite antes de enviar.':'Não foi possível enviar o convite. Verifique o modelo e a conexão do WhatsApp.'});}
 });
 
 app.post('/api/rsvp', { config: { rateLimit: { max: 5, timeWindow: '15 minutes' } } }, async (req, reply) => {
@@ -288,6 +308,7 @@ app.post('/api/admin/register', { config: { rateLimit: { max: 3, timeWindow: '15
     const rsvpDeadline = new Date(eventDate); rsvpDeadline.setDate(rsvpDeadline.getDate()-30);
     const iso = value => value.toISOString().slice(0,10);
     for (const row of defaults.rows) {
+      if (row.key==='invitation_template') continue;
       let value = row.value;
       if (row.key==='story_content') value={...value,eyebrow:'NOSSA HISTÓRIA',title:'Nossa História',body:'Compartilhe aqui a história de vocês.',facts:['O primeiro encontro','Uma data especial','Um sonho em comum'],question:'E o próximo capítulo?',answer:'Começa agora!' };
       if (row.key==='venue_ceremony') value={...value,eyebrow:'CERIMÔNIA',title:'Cerimônia',name:'Local da cerimônia',address:'Endereço a definir',mapsUrl:'https://www.google.com/maps/search/?api=1&query=local+da+cerimonia',imageUrl:'',imageAlt:'Local da cerimônia'};
@@ -478,9 +499,9 @@ app.post('/api/webhooks/asaas/:weddingId', { config:{rateLimit:{max:120,timeWind
   }catch(error){await db.query('ROLLBACK').catch(()=>{});throw error;}finally{db.release();}
 });
 app.get('/api/admin/data', { preHandler: requireAdmin }, async (req) => {
-  const [memories, guests, suppliers, gifts, settings] = await Promise.all([req.db.query('SELECT * FROM memories ORDER BY created_at DESC'), req.db.query('SELECT * FROM guests ORDER BY created_at DESC'), req.db.query('SELECT * FROM suppliers ORDER BY name'),req.db.query('SELECT * FROM gifts ORDER BY category,title'),req.db.query("SELECT key,value FROM site_settings WHERE key IN ('venue_ceremony','venue_reception','story_content','event_schedule','design_theme') ORDER BY key")]);
+  const [memories, guests, suppliers, gifts, settings] = await Promise.all([req.db.query('SELECT * FROM memories ORDER BY created_at DESC'), req.db.query('SELECT * FROM guests ORDER BY created_at DESC'), req.db.query('SELECT * FROM suppliers ORDER BY name'),req.db.query('SELECT * FROM gifts ORDER BY category,title'),req.db.query("SELECT key,value FROM site_settings WHERE key IN ('venue_ceremony','venue_reception','story_content','event_schedule','design_theme','invitation_template') ORDER BY key")]);
   const values=Object.fromEntries(settings.rows.map(r=>[r.key,r.value]));
-  return { wedding:{slug:req.weddingSlug,title:req.weddingTitle}, memories: memories.rows.map(r => ({ ...memoryOut(r), whatsapp:r.whatsapp, isVisible:r.is_visible })), guests: guests.rows.map(r => ({ ...guestOut(r), whatsapp:r.whatsapp, isVisible:r.is_visible, isConfirmed:r.is_confirmed, companionNames:r.companion_names })), suppliers: suppliers.rows.map(r => ({ id:r.id,name:r.name,role:r.role,contact:r.contact,cost:Number(r.cost),paidAmount:Number(r.paid_amount),status:r.status,isVisible:r.is_visible })), gifts:gifts.rows.map(giftOut), venues: ['venue_ceremony','venue_reception'].map(k=>values[k]).filter(Boolean), story:values.story_content||null, event:values.event_schedule||null, design:values.design_theme||null };
+  return { wedding:{slug:req.weddingSlug,title:req.weddingTitle}, memories: memories.rows.map(r => ({ ...memoryOut(r), whatsapp:r.whatsapp, isVisible:r.is_visible })), guests: guests.rows.map(r => ({ ...guestOut(r), whatsapp:r.whatsapp, isVisible:r.is_visible, isConfirmed:r.is_confirmed, companionNames:r.companion_names })), suppliers: suppliers.rows.map(r => ({ id:r.id,name:r.name,role:r.role,contact:r.contact,cost:Number(r.cost),paidAmount:Number(r.paid_amount),status:r.status,isVisible:r.is_visible })), gifts:gifts.rows.map(giftOut), venues: ['venue_ceremony','venue_reception'].map(k=>values[k]).filter(Boolean), story:values.story_content||null, event:values.event_schedule||null, design:values.design_theme||null, invitationTemplate:values.invitation_template?{message:values.invitation_template.message,imageUrl:`/media/${values.invitation_template.imageKey}`} : null };
 });
 app.patch('/api/admin/slug', { preHandler: requireAdmin }, async (req, reply) => {
   const { slug } = req.body || {};
@@ -651,8 +672,13 @@ app.post('/api/admin/guests', { preHandler: requireAdmin }, async (req,reply)=>{
   await req.db.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`rsvp:${req.weddingId}:${normalizeBrazilianPhone(whatsapp)}:${normalizeGuestName(name)}`]);
   const existing=await req.db.query('SELECT name,whatsapp FROM guests WHERE wedding_id=$1',[req.weddingId]);
   if(existing.rows.some(row=>normalizeBrazilianPhone(row.whatsapp)===normalizeBrazilianPhone(whatsapp)&&normalizeGuestName(row.name)===normalizeGuestName(name)))return reply.code(409).send({error:'Este convidado já está cadastrado.'});
-  const result=await req.db.query('INSERT INTO guests(name,whatsapp,is_confirmed,wedding_id) VALUES($1,$2,$3,$4) RETURNING id',[name.trim(),whatsapp.trim(),false,req.weddingId]);
-  return reply.code(201).send({id:result.rows[0].id});
+  const settings=await req.db.query("SELECT value FROM site_settings WHERE key='invitation_template'");
+  const result=await req.db.query('INSERT INTO guests(name,whatsapp,is_confirmed,wedding_id) VALUES($1,$2,$3,$4) RETURNING id,name,whatsapp,invite_token',[name.trim(),whatsapp.trim(),false,req.weddingId]);
+  await req.db.query('COMMIT');req.db.release();req.dbReleased=true;
+  let invitationSent=false;
+  try { await sendSavedInvitation(req,result.rows[0],settings.rows[0]?.value); invitationSent=true; }
+  catch(error) { req.log.warn({err:error},'Convidado salvo; envio do convite falhou.'); }
+  return reply.code(201).send({id:result.rows[0].id,invitationSent,invitationError:invitationSent?null:settings.rowCount?'Não foi possível enviar o convite. Verifique o modelo e a conexão do WhatsApp.':'Salve o modelo do convite para poder enviá-lo.'});
 });
 app.post('/api/admin/photos', {preHandler:requireAdmin,bodyLimit:5*1024*1024+64*1024}, async(req,reply)=>{
   if(!isStorageConfigured())return reply.code(503).send({error:'Armazenamento de imagens não configurado.'});

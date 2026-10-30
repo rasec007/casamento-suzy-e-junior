@@ -3,7 +3,7 @@ import { access, lstat, mkdir, open, readFile, realpath, unlink } from 'node:fs/
 import { dirname, extname, isAbsolute, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-const keyPattern = /^(?:venues\/(?:ceremony|reception)|gifts)\/[a-f0-9-]{36}\.(?:jpg|png|webp)$|^weddings\/[a-f0-9-]{36}\/(?:(?:venues\/(?:ceremony|reception)\/)|(?:gifts|hero|mirror)\/)[a-f0-9-]{36}\.(?:jpg|png|webp)$/;
+const keyPattern = /^(?:venues\/(?:ceremony|reception)|gifts)\/[a-f0-9-]{36}\.(?:jpg|png|webp)$|^weddings\/[a-f0-9-]{36}\/(?:(?:venues\/(?:ceremony|reception)\/)|(?:gifts|hero|mirror|invitation)\/)[a-f0-9-]{36}\.(?:jpg|png|webp)$/;
 const types = { '.jpg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp' };
 const directory = resolve(process.env.STORAGE_DIR || '.local-runtime/uploads');
 
