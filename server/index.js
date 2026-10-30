@@ -153,14 +153,14 @@ app.get('/api/site', async (req) => {
     req.db.query('SELECT * FROM gifts ORDER BY id'),
     req.db.query(`SELECT ${publicMemoryFields} FROM memories WHERE is_visible ORDER BY created_at DESC LIMIT 100`),
     req.db.query('SELECT id,image_key FROM mirror_photos ORDER BY position,created_at,id'),
-    req.db.query("SELECT key,value FROM site_settings WHERE key IN ('venue_ceremony','venue_reception','story_content','event_schedule','design_theme') ORDER BY key")
+    req.db.query("SELECT key,value FROM site_settings WHERE wedding_id=$1 AND key IN ('venue_ceremony','venue_reception','story_content','event_schedule','design_theme','hero_content') ORDER BY key",[req.weddingId])
     ,req.db.query('SELECT is_active FROM payment_integrations WHERE wedding_id=$1',[req.weddingId])
   ]);
   const settings=Object.fromEntries(venues.rows.map(r=>[r.key,r.value]));
   const activePayments=Boolean(paymentIntegration.rows[0]?.is_active);
   const pending=activePayments?await req.db.query("SELECT DISTINCT gift_id FROM gift_payments WHERE wedding_id=$1 AND status IN ('CREATING','PENDING') AND expires_at>now()",[req.weddingId]):{rows:[]};
   const reserved=new Set(pending.rows.map(row=>row.gift_id));
-  return { wedding:{slug:req.weddingSlug,title:req.weddingTitle}, gifts: gifts.rows.map(row=>({...giftOut(row),giftedBy:'',isReserved:reserved.has(row.id)})), memories: memories.rows.map(row=>({id:row.id,message:row.message,createdAt:date(row.created_at)})), photos: photos.rows.map(row=>({id:row.id,imageUrl:`/media/${row.image_key}`})), venues: ['venue_ceremony','venue_reception'].map(k=>settings[k]).filter(Boolean), story:settings.story_content||null, event:settings.event_schedule||null, design:settings.design_theme||null, paymentsEnabled:activePayments };
+  return { wedding:{slug:req.weddingSlug,title:req.weddingTitle}, gifts: gifts.rows.map(row=>({...giftOut(row),giftedBy:'',isReserved:reserved.has(row.id)})), memories: memories.rows.map(row=>({id:row.id,message:row.message,createdAt:date(row.created_at)})), photos: photos.rows.map(row=>({id:row.id,imageUrl:`/media/${row.image_key}`})), venues: ['venue_ceremony','venue_reception'].map(k=>settings[k]).filter(Boolean), story:settings.story_content||null, event:settings.event_schedule||null, design:settings.design_theme||null, hero:settings.hero_content||{title:req.weddingTitle,eyebrow:'CAPÍTULO SOLENE • MMXXVII'}, paymentsEnabled:activePayments };
 });
 app.get('/api/theme.css', async(req,reply)=>{
   const result=await req.db.query("SELECT value FROM site_settings WHERE key='design_theme'");
@@ -320,7 +320,7 @@ app.post('/api/admin/register', { config: { rateLimit: { max: 3, timeWindow: '2 
     const rsvpDeadline = new Date(eventDate); rsvpDeadline.setDate(rsvpDeadline.getDate()-30);
     const iso = value => value.toISOString().slice(0,10);
     for (const row of defaults.rows) {
-      if (row.key==='invitation_template') continue;
+      if (['invitation_template','hero_content'].includes(row.key)) continue;
       let value = row.value;
       if (row.key==='story_content') value={...value,eyebrow:'NOSSA HISTÓRIA',title:'Nossa História',body:'Compartilhe aqui a história de vocês.',facts:['O primeiro encontro','Uma data especial','Um sonho em comum'],question:'E o próximo capítulo?',answer:'Começa agora!' };
       if (row.key==='venue_ceremony') value={...value,eyebrow:'CERIMÔNIA',title:'Cerimônia',name:'Local da cerimônia',address:'Endereço a definir',mapsUrl:'https://www.google.com/maps/search/?api=1&query=local+da+cerimonia',imageUrl:'',imageAlt:'Local da cerimônia'};
@@ -520,9 +520,16 @@ app.post('/api/webhooks/asaas/:weddingId', { config:{rateLimit:{max:120,timeWind
   }catch(error){await db.query('ROLLBACK').catch(()=>{});throw error;}finally{db.release();}
 });
 app.get('/api/admin/data', { preHandler: requireAdmin }, async (req) => {
-  const [memories, guests, suppliers, gifts, settings] = await Promise.all([req.db.query('SELECT * FROM memories ORDER BY created_at DESC'), req.db.query('SELECT * FROM guests ORDER BY created_at DESC'), req.db.query('SELECT * FROM suppliers ORDER BY name'),req.db.query('SELECT * FROM gifts ORDER BY category,title'),req.db.query("SELECT key,value FROM site_settings WHERE key IN ('venue_ceremony','venue_reception','story_content','event_schedule','design_theme','invitation_template') ORDER BY key")]);
+  const [memories, guests, suppliers, gifts, settings] = await Promise.all([req.db.query('SELECT * FROM memories ORDER BY created_at DESC'), req.db.query('SELECT * FROM guests ORDER BY created_at DESC'), req.db.query('SELECT * FROM suppliers ORDER BY name'),req.db.query('SELECT * FROM gifts ORDER BY category,title'),req.db.query("SELECT key,value FROM site_settings WHERE wedding_id=$1 AND key IN ('venue_ceremony','venue_reception','story_content','event_schedule','design_theme','invitation_template','hero_content') ORDER BY key",[req.weddingId])]);
   const values=Object.fromEntries(settings.rows.map(r=>[r.key,r.value]));
-  return { wedding:{slug:req.weddingSlug,title:req.weddingTitle}, memories: memories.rows.map(r => ({ ...memoryOut(r), whatsapp:r.whatsapp, isVisible:r.is_visible })), guests: guests.rows.map(r => ({ ...guestOut(r), whatsapp:r.whatsapp, isVisible:r.is_visible, isConfirmed:r.is_confirmed, companionNames:r.companion_names })), suppliers: suppliers.rows.map(r => ({ id:r.id,name:r.name,role:r.role,contact:r.contact,cost:Number(r.cost),paidAmount:Number(r.paid_amount),status:r.status,isVisible:r.is_visible })), gifts:gifts.rows.map(giftOut), venues: ['venue_ceremony','venue_reception'].map(k=>values[k]).filter(Boolean), story:values.story_content||null, event:values.event_schedule||null, design:values.design_theme||null, invitationTemplate:values.invitation_template?{message:values.invitation_template.message,imageUrl:`/media/${values.invitation_template.imageKey}`} : null };
+  return { wedding:{slug:req.weddingSlug,title:req.weddingTitle}, memories: memories.rows.map(r => ({ ...memoryOut(r), whatsapp:r.whatsapp, isVisible:r.is_visible })), guests: guests.rows.map(r => ({ ...guestOut(r), whatsapp:r.whatsapp, isVisible:r.is_visible, isConfirmed:r.is_confirmed, companionNames:r.companion_names })), suppliers: suppliers.rows.map(r => ({ id:r.id,name:r.name,role:r.role,contact:r.contact,cost:Number(r.cost),paidAmount:Number(r.paid_amount),status:r.status,isVisible:r.is_visible })), gifts:gifts.rows.map(giftOut), venues: ['venue_ceremony','venue_reception'].map(k=>values[k]).filter(Boolean), story:values.story_content||null, event:values.event_schedule||null, design:values.design_theme||null, hero:values.hero_content||{title:req.weddingTitle,eyebrow:'CAPÍTULO SOLENE • MMXXVII'}, invitationTemplate:values.invitation_template?{message:values.invitation_template.message,imageUrl:`/media/${values.invitation_template.imageKey}`} : null };
+});
+app.patch('/api/admin/hero', {preHandler:requireAdmin}, async(req,reply)=>{
+  const {title,eyebrow}=req.body||{};
+  if(!text(title,180)||!text(eyebrow,100))return reply.code(400).send({error:'Informe o título dos noivos e a chamada da abertura.'});
+  const hero={title:title.trim(),eyebrow:eyebrow.trim()};
+  await req.db.query("INSERT INTO site_settings(wedding_id,key,value) VALUES($1,'hero_content',$2::jsonb) ON CONFLICT(wedding_id,key) DO UPDATE SET value=EXCLUDED.value,updated_at=now()",[req.weddingId,JSON.stringify(hero)]);
+  return {hero};
 });
 app.patch('/api/admin/slug', { preHandler: requireAdmin }, async (req, reply) => {
   const { slug } = req.body || {};

@@ -73,3 +73,5 @@ html:has(dialog:modal){overflow:hidden}dialog:modal{overscroll-behavior:contain}
 .admin-tab-title{margin:24px 0 16px;color:var(--text);font:500 clamp(19px,2vw,25px) var(--serif)}
 
 .account-register summary.create-site-button{display:block;width:100%;padding:14px 18px;border:1px solid var(--button-bg,var(--gold));background:var(--button-bg,var(--gold));color:var(--button-fg,var(--bg));font:600 12px var(--serif);text-align:center;cursor:pointer}.account-register summary.create-site-button:hover{background:var(--button-hover,#d4b475)}
+
+#hero-settings-form{width:100%;max-width:none;margin-left:0;margin-right:0}#hero-settings-form h3{margin:0}
