@@ -25,7 +25,7 @@ const live = new pg.Client({ connectionString: process.env.DATABASE_URL, applica
 
 await app.register(cookie, { secret: process.env.SESSION_SECRET || 'development-only-secret-change-this-now' });
 await app.register(helmet, { global: true, contentSecurityPolicy: { directives: { defaultSrc: ["'self'"], styleSrc: ["'self'", 'https://fonts.googleapis.com', 'https://use.typekit.net'], fontSrc: ["'self'", 'data:', 'https://fonts.gstatic.com', 'https://use.typekit.net'], imgSrc: ["'self'", 'data:'], scriptSrc: ["'self'"], connectSrc: ["'self'"], objectSrc: ["'none'"], upgradeInsecureRequests: null } } });
-await app.register(rateLimit, { global: true, max: 180, timeWindow: '1 minute' });
+await app.register(rateLimit, { global: true, max: 180, timeWindow: '1 minute', errorResponseBuilder: (_request, context) => { const seconds=Math.max(1,Math.ceil(context.ttl/1000)); return {statusCode:429,message:`Muitas tentativas. Aguarde ${seconds} ${seconds===1?'segundo':'segundos'} antes de tentar novamente.`}; } });
 await app.register(multipart, { limits: { fileSize: 5 * 1024 * 1024, files: 1, fields: 8, parts: 10 } });
 await app.register(fastifyStatic, { root: join(root, '../public'), prefix: '/', maxAge: process.env.NODE_ENV === 'production' ? '1h' : 0, immutable: false, wildcard: false });
 
@@ -180,14 +180,14 @@ app.get('/media/*', async (req, reply) => {
   } catch(error) { if(error.name==='NoSuchKey'||error.$metadata?.httpStatusCode===404)return reply.code(404).send({error:'Imagem não encontrada.'});throw error; }
 });
 
-app.get('/api/invitation', { config:{rateLimit:{max:30,timeWindow:'15 minutes'}} }, async(req,reply)=>{
+app.get('/api/invitation', { config:{rateLimit:{max:30,timeWindow:'2 minutes'}} }, async(req,reply)=>{
   if(!/^[a-f0-9]{64}$/.test(req.headers['x-invitation-token'])) return reply.code(404).send({error:'Convite não encontrado.'});
   const result=await req.db.query('SELECT name,companions,companion_names,is_confirmed FROM guests WHERE invite_token=$1',[req.headers['x-invitation-token']]);
   if(!result.rowCount)return reply.code(404).send({error:'Convite não encontrado.'});
   reply.header('cache-control','no-store');
   const g=result.rows[0];return {name:g.name,companionNames:g.companion_names,companions:g.companions,isConfirmed:g.is_confirmed,wedding:req.weddingTitle};
 });
-app.post('/api/invitation/confirm', { config:{rateLimit:{max:10,timeWindow:'15 minutes'}} }, async(req,reply)=>{
+app.post('/api/invitation/confirm', { config:{rateLimit:{max:10,timeWindow:'2 minutes'}} }, async(req,reply)=>{
   if(!/^[a-f0-9]{64}$/.test(req.headers['x-invitation-token']))return reply.code(404).send({error:'Convite não encontrado.'});
   const {companionNames}=req.body||{};
   if(!Array.isArray(companionNames)||companionNames.length>4||companionNames.some(n=>!text(n,120)))return reply.code(400).send({error:'Informe os nomes dos acompanhantes (até quatro).'});
@@ -233,7 +233,7 @@ app.post('/api/admin/invitations/:id/send', {preHandler:requireAdmin}, async(req
   catch(error){req.log.warn({err:error},'Falha ao enviar convite');return reply.code(502).send({error:!settings.rowCount?'Salve o modelo do convite antes de enviar.':'Não foi possível enviar o convite. Verifique o modelo e a conexão do WhatsApp.'});}
 });
 
-app.post('/api/rsvp', { config: { rateLimit: { max: 5, timeWindow: '15 minutes' } } }, async (req, reply) => {
+app.post('/api/rsvp', { config: { rateLimit: { max: 5, timeWindow: '2 minutes' } } }, async (req, reply) => {
   const { name, whatsapp, companions = 0 } = req.body || {};
   if (!text(name, 120) || !phone(whatsapp) || !Number.isInteger(companions) || companions < 0 || companions > 4) return reply.code(400).send({ error: 'Confira nome, WhatsApp e quantidade de acompanhantes.' });
   const schedule=await req.db.query("SELECT value->>'rsvpDeadline' AS deadline FROM site_settings WHERE key='event_schedule'");
@@ -248,7 +248,7 @@ app.post('/api/rsvp', { config: { rateLimit: { max: 5, timeWindow: '15 minutes' 
   catch (error) { req.log.warn({ err: error }, 'RSVP salvo; não foi possível enviar a confirmação por WhatsApp.'); }
   return reply.code(201).send({ guest: guestOut(result.rows[0]), notificationSent });
 });
-app.post('/api/memories/dedication', { config: { rateLimit: { max: 5, timeWindow: '15 minutes' } } }, async (req, reply) => {
+app.post('/api/memories/dedication', { config: { rateLimit: { max: 5, timeWindow: '2 minutes' } } }, async (req, reply) => {
   const { guestId, message, writtenAt } = req.body || {};
   if (typeof guestId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(guestId) || !text(message, 1000) || !isoDate(writtenAt)) {
     return reply.code(400).send({ error: 'Informe uma frase para a Penseira e a data em que foi escrita.' });
@@ -259,7 +259,7 @@ app.post('/api/memories/dedication', { config: { rateLimit: { max: 5, timeWindow
   const result = await req.db.query("INSERT INTO memories(sender_name,whatsapp,gift_title,gift_amount,message,created_at,wedding_id) VALUES($1,'','Dedicatória',0,$2,$3,$4) RETURNING id,sender_name,gift_title,gift_amount,message,created_at", [guest.rows[0].name, message.trim(), createdAt, req.weddingId]);
   return reply.code(201).send({ memory: memoryOut(result.rows[0]) });
 });
-app.post('/api/memories/guest-dedication', { config:{rateLimit:{max:5,timeWindow:'15 minutes'}} }, async(req,reply)=>{
+app.post('/api/memories/guest-dedication', { config:{rateLimit:{max:5,timeWindow:'2 minutes'}} }, async(req,reply)=>{
   const {name,whatsapp,message}=req.body||{};
   if(!text(name,120)||!phone(whatsapp)||!text(message,1000))return reply.code(400).send({error:'Informe nome, WhatsApp e uma dedicatória de até 1.000 caracteres.'});
   const guests=await req.db.query('SELECT name,whatsapp FROM guests WHERE wedding_id=$1 AND is_confirmed=true',[req.weddingId]);
@@ -268,7 +268,7 @@ app.post('/api/memories/guest-dedication', { config:{rateLimit:{max:5,timeWindow
   await req.db.query("INSERT INTO memories(sender_name,whatsapp,gift_title,gift_amount,message,wedding_id) VALUES($1,$2,'Dedicatória',0,$3,$4)",[guest.name,whatsapp.trim(),message.trim(),req.weddingId]);
   return reply.code(201).send({ok:true});
 });
-app.post('/api/memories', { config: { rateLimit: { max: 5, timeWindow: '15 minutes' } } }, async (req, reply) => {
+app.post('/api/memories', { config: { rateLimit: { max: 5, timeWindow: '2 minutes' } } }, async (req, reply) => {
   const { senderName, whatsapp, message = '', giftId } = req.body || {};
   if (!text(senderName, 120) || !phone(whatsapp) || typeof message !== 'string' || message.length > 1000 || !text(giftId, 40)) return reply.code(400).send({ error: 'Confira seus dados e a mensagem (até 1.000 caracteres).' });
   const paymentConfig=await req.db.query('SELECT is_active FROM payment_integrations WHERE wedding_id=$1',[req.weddingId]);
@@ -298,7 +298,7 @@ app.post('/api/admin/memories', { preHandler: requireAdmin }, async (req,reply)=
   const result=await req.db.query("INSERT INTO memories(sender_name,whatsapp,gift_title,gift_amount,message,created_at,wedding_id) VALUES($1,'','Dedicatória',0,$2,$3,$4) RETURNING id,sender_name,gift_title,gift_amount,message,created_at",[senderName.trim(),message.trim(),createdAt,req.weddingId]);
   return reply.code(201).send({memory:memoryOut(result.rows[0])});
 });
-app.post('/api/admin/register', { config: { rateLimit: { max: 3, timeWindow: '15 minutes' } } }, async (req, reply) => {
+app.post('/api/admin/register', { config: { rateLimit: { max: 3, timeWindow: '2 minutes' } } }, async (req, reply) => {
   const { title, slug, username, email, password } = req.body || {};
   if (!text(title, 180) || typeof slug !== 'string' || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug) || slug.length > 80 || !text(username, 40) || !/^[a-zA-Z0-9._-]{3,40}$/.test(username.trim()) || typeof email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim()) || email.length > 254 || typeof password !== 'string' || password.length < 12 || password.length > 200) {
     return reply.code(400).send({ error: 'Informe o nome do casamento, slug (letras minúsculas e hífens), usuário, e-mail e senha com pelo menos 12 caracteres.' });
@@ -332,7 +332,7 @@ app.post('/api/admin/register', { config: { rateLimit: { max: 3, timeWindow: '15
   } catch(error) { await db.query('ROLLBACK').catch(()=>{}); throw error; }
   finally { db.release(); }
 });
-app.post('/api/admin/login', { config: { rateLimit: { max: 8, timeWindow: '15 minutes', keyGenerator: request => createHash('sha256').update(`${request.ip}:${String(request.body?.email || request.body?.identifier || '').trim().toLowerCase()}`).digest('hex') } } }, async (req, reply) => {
+app.post('/api/admin/login', { config: { rateLimit: { max: 8, timeWindow: '2 minutes', keyGenerator: request => createHash('sha256').update(`${request.ip}:${String(request.body?.email || request.body?.identifier || '').trim().toLowerCase()}`).digest('hex') } } }, async (req, reply) => {
   const { identifier: suppliedIdentifier, email, password } = req.body || {};
   const identifier = email || suppliedIdentifier;
   if (typeof identifier !== 'string' || identifier.length > 254 || typeof password !== 'string' || password.length > 200) return reply.code(401).send({ error: 'Usuário/e-mail ou senha inválidos.' });
@@ -440,7 +440,7 @@ app.patch('/api/admin/payments/activation', { preHandler: requireAdmin }, async(
   await req.db.query('UPDATE payment_integrations SET is_active=$2,updated_at=now() WHERE wedding_id=$1',[req.weddingId,enabled]);
   return {ok:true,isActive:enabled};
 });
-app.post('/api/payments/checkout', { config:{rateLimit:{max:5,timeWindow:'15 minutes'}} }, async(req,reply)=>{
+app.post('/api/payments/checkout', { config:{rateLimit:{max:5,timeWindow:'2 minutes'}} }, async(req,reply)=>{
   const {giftId,senderName,whatsapp,email='',dedication=''}=req.body||{};
   if(!text(giftId,40)||!text(senderName,120)||!phone(whatsapp)||typeof email!=='string'||email.length>254||(email&&!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))||typeof dedication!=='string'||dedication.length>1000)return reply.code(400).send({error:'Confira o presente, nome, WhatsApp e e-mail informado.'});
   const config=await req.db.query('SELECT environment,api_key_cipher,is_active FROM payment_integrations WHERE wedding_id=$1',[req.weddingId]);
