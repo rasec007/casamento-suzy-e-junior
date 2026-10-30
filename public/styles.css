@@ -79,3 +79,4 @@ html:has(dialog:modal){overflow:hidden}dialog:modal{overscroll-behavior:contain}
 #nav a[hidden]{display:none}#menu-settings-form{width:100%;max-width:none;margin-left:0;margin-right:0}#menu-settings-form h3,#menu-settings-form p{margin:0}.menu-settings-options{display:flex;gap:14px 24px;flex-wrap:wrap}.admin-story label.menu-setting{flex-direction:row;align-items:center;gap:8px}.admin-story .menu-setting input{width:auto;flex-shrink:0;padding:0}
 
 .menu-settings-options{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr));gap:14px}.menu-setting-row{display:grid;gap:8px;padding:12px;border:1px solid #c0a06245}.menu-setting-row>label:not(.menu-setting){display:grid;gap:6px}
+#mirror-content-form,#photo-form{width:100%;max-width:none;margin-left:0;margin-right:0}
