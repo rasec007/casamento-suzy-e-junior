@@ -78,7 +78,7 @@ function openGift(gift){
   dialog.showModal();
   $('#memory-form').addEventListener('submit',async event=>{event.preventDefault();const form=event.currentTarget;const button=$('button[type="submit"]',form);button.disabled=true;try{await api('/api/memories',{method:'POST',body:JSON.stringify({...Object.fromEntries(new FormData(form)),giftId:gift.id})});form.reset();dialog.close();notify('Presente confirmado. Ele continuará na lista como presenteado.');await loadSite()}catch(error){$('.form-status',form).textContent=error.message}finally{button.disabled=false}});
 }
-const tabs=[['visao-geral','Visão geral'],['historia','Nossa História'],['datas','Data, Locais e Convite'],['pagamentos','Pagamentos'],['presentes','Dedicatórias'],['convidados','Lista de convidados'],['fornecedores','Fornecedores'],['lista-presentes','Presentes'],['fotos','Fotos do espelho'],['design','Design do site']];
+const tabs=[['visao-geral','Visão geral'],['design','Design do site'],['historia','Nossa História'],['fotos','Fotos do espelho'],['datas','Data, Locais e Convite'],['pagamentos','Pagamentos'],['presentes','Dedicatórias'],['convidados','Lista de convidados'],['fornecedores','Fornecedores'],['lista-presentes','Presentes']];
 function recordRows(){
   const lists={
     presentes:state.admin.memories.map(r=>({kind:'memories',id:r.id,title:r.senderName,detail:`Dedicatória · ${r.createdAt} · ${r.message||'sem frase'}`,visible:r.isVisible,edit:[['senderName','Nome',r.senderName],['message','Mensagem',r.message]]})),
