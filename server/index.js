@@ -104,7 +104,8 @@ app.addHook('onSend', async (request, reply, payload) => {
   return payload;
 });
 const text = (value, max = 120) => typeof value === 'string' && value.trim().length > 0 && value.trim().length <= max;
-const phone = value => typeof value === 'string' && /^[+()\d .-]{8,24}$/.test(value);
+const phone = value => typeof value === 'string' && /^[+()\d .-]{8,24}$/.test(value) && /^[1-9]{2}9\d{8}$/.test(normalizeBrazilianPhone(value));
+const optionalPhone = value => value === '' || phone(value);
 const money = value => Number.isFinite(Number(value)) && Number(value) >= 0 && Number(value) <= 10000000;
 const paymentsWebhookBase = request => process.env.PAYMENTS_WEBHOOK_BASE_URL || (process.env.NODE_ENV==='production'&&process.env.APP_URL?process.env.APP_URL:`${request.protocol}://${request.headers.host}`);
 const isoDate = value => typeof value==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(value)&&!Number.isNaN(new Date(`${value}T12:00:00-03:00`).valueOf())&&new Date(`${value}T12:00:00-03:00`).toISOString().slice(0,10)===value;
@@ -696,7 +697,7 @@ app.patch('/api/admin/:kind/:id', { preHandler: requireAdmin }, async (req, repl
   const specs = {
     memories: { table:'memories', fields:{ senderName:['sender_name', v=>text(v,120)], message:['message', v=>typeof v==='string'&&v.length<=1000], isVisible:['is_visible',v=>typeof v==='boolean'] } },
     guests: { table:'guests', fields:{ name:['name',v=>text(v,120)], whatsapp:['whatsapp',phone], isConfirmed:['is_confirmed',v=>typeof v==='boolean'], companions:['companions',v=>Number.isInteger(v)&&v>=0&&v<=4], isVisible:['is_visible',v=>typeof v==='boolean'] } },
-    suppliers: { table:'suppliers', fields:{ name:['name',v=>text(v,120)], role:['role',v=>text(v,180)], contact:['contact',v=>typeof v==='string'&&v.length<=80], cost:['cost',money], paidAmount:['paid_amount',money], status:['status',v=>['Contratado','Em Negociação','Quitado'].includes(v)], isVisible:['is_visible',v=>typeof v==='boolean'] } }
+    suppliers: { table:'suppliers', fields:{ name:['name',v=>text(v,120)], role:['role',v=>text(v,180)], contact:['contact',optionalPhone], cost:['cost',money], paidAmount:['paid_amount',money], status:['status',v=>['Contratado','Em Negociação','Quitado'].includes(v)], isVisible:['is_visible',v=>typeof v==='boolean'] } }
   };
   const spec=specs[kind]; const entries=Object.entries(b).filter(([key])=>spec.fields[key]);
   if (!entries.length || entries.some(([key,value])=>!spec.fields[key][1](value))) return reply.code(400).send({ error:'Dados inválidos.' });
@@ -749,7 +750,7 @@ app.delete('/api/admin/photos/:id', {preHandler:requireAdmin}, async(req,reply)=
 });
 app.post('/api/admin/suppliers', { preHandler: requireAdmin }, async (req,reply)=>{
   const {name,role,cost=0,contact=''}=req.body||{};
-  if(!text(name,120)||!text(role,180)||!money(cost)||typeof contact!=='string'||contact.length>80) return reply.code(400).send({error:'Dados inválidos.'});
+  if(!text(name,120)||!text(role,180)||!money(cost)||!optionalPhone(contact)) return reply.code(400).send({error:'Dados inválidos.'});
   const result=await req.db.query("INSERT INTO suppliers(name,role,cost,contact,wedding_id) VALUES($1,$2,$3,$4,$5) RETURNING id",[name.trim(),role.trim(),cost,contact.trim(),req.weddingId]);
   return reply.code(201).send({id:result.rows[0].id});
 });
