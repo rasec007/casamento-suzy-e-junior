@@ -64,3 +64,4 @@ html:has(dialog:modal){overflow:hidden}dialog:modal{overscroll-behavior:contain}
 
 .event-invitation-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;align-items:start}.event-invitation-grid>section{min-width:0}.event-invitation-grid .admin-story{width:100%;max-width:none;margin:22px 0 0}@media(max-width:650px){.event-invitation-grid{grid-template-columns:1fr}}
 .admin-story label.payment-check{flex-direction:row;align-items:center;gap:10px}.admin-story .payment-check input[type=checkbox]{width:auto;padding:0;flex-shrink:0}
+#admin-story-form,#payment-config-form,#design-form{width:100%;max-width:none;margin-left:0;margin-right:0}
