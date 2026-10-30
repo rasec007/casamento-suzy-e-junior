@@ -54,3 +54,4 @@
 
 .section.mirror-gifts { margin: 0; padding: 100px max(20px,calc((100vw - 1160px)/2)); }
 @media(max-width:650px) { .section.mirror-gifts { padding: 72px 18px; } }
+.invitation-guests{display:grid;gap:.5rem;max-height:20rem;overflow:auto}.invitation-format{display:flex;flex-wrap:wrap;gap:.5rem}#companion-fields{display:grid;gap:1rem}

@@ -12,14 +12,14 @@ import { dirname, join } from 'node:path';
 import { createHash, timingSafeEqual, randomUUID, scrypt as scryptCallback, randomBytes } from 'node:crypto';
 import { promisify } from 'node:util';
 import { INITIAL_GIFTS, INITIAL_MEMORIES, INITIAL_GUESTS, INITIAL_SUPPLIERS } from './seed-data.js';
-import { sendRsvpConfirmation } from './evolution.js';
+import { sendRsvpConfirmation, sendInvitation } from './evolution.js';
 import { normalizeBrazilianPhone, normalizeGuestName } from './guest-match.js';
 import { asaasCheckoutUrl, asaasRequest, checkoutItem, decryptSecret, encryptSecret, hashWebhookToken, secureTokenMatches } from './asaas.js';
 import { isStorageConfigured, ensureStorage, putImage, getImage, deleteImage, closeStorage } from './storage.js';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const scrypt = promisify(scryptCallback);
-const app = Fastify({ logger: { redact: ['req.headers.cookie', 'req.headers.authorization'] }, trustProxy: process.env.TRUST_PROXY === 'true', bodyLimit: 16_384, requestTimeout: 15_000 });
+const app = Fastify({ logger: { redact: ['req.headers.cookie', 'req.headers.authorization', 'req.headers.x-invitation-token'] }, trustProxy: process.env.TRUST_PROXY === 'true', bodyLimit: 16_384, requestTimeout: 15_000 });
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 12, connectionTimeoutMillis: 5000, idleTimeoutMillis: 30_000, application_name: 'suzy-junior-wedding' });
 const live = new pg.Client({ connectionString: process.env.DATABASE_URL, application_name: 'suzy-junior-realtime' });
 
@@ -34,6 +34,8 @@ app.addHook('onRequest', async (request, reply) => {
   const pathname = new URL(request.url, 'http://local').pathname;
   if (pathname.startsWith('/api/') || pathname.startsWith('/media/') || pathname.startsWith('/images/') || /\.(?:css|js|ico|png|jpe?g|webp|svg|woff2?)$/i.test(pathname)) return;
   if (pathname === '/') return reply.code(200).header('cache-control', 'no-store').sendFile('not-found.html');
+  const confirmation = pathname.match(/^\/casamento\/([a-z0-9]+(?:-[a-z0-9]+)*)\/confirmar\/?$/);
+  if (confirmation) { const found=await pool.query('SELECT 1 FROM weddings WHERE slug=$1',[confirmation[1]]); if(found.rowCount) return reply.header('referrer-policy','no-referrer').header('cache-control','no-store').sendFile('confirmar.html'); }
   const match = pathname.match(/^\/casamento\/([a-z0-9]+(?:-[a-z0-9]+)*)\/?$/);
   if (match) {
     const found = await pool.query('SELECT 1 FROM weddings WHERE slug=$1', [match[1]]);
@@ -176,6 +178,40 @@ app.get('/media/*', async (req, reply) => {
     return reply.send(image.Body);
   } catch(error) { if(error.name==='NoSuchKey'||error.$metadata?.httpStatusCode===404)return reply.code(404).send({error:'Imagem não encontrada.'});throw error; }
 });
+
+app.get('/api/invitation', { config:{rateLimit:{max:30,timeWindow:'15 minutes'}} }, async(req,reply)=>{
+  if(!/^[a-f0-9]{64}$/.test(req.headers['x-invitation-token'])) return reply.code(404).send({error:'Convite não encontrado.'});
+  const result=await req.db.query('SELECT name,companions,companion_names,is_confirmed FROM guests WHERE invite_token=$1',[req.headers['x-invitation-token']]);
+  if(!result.rowCount)return reply.code(404).send({error:'Convite não encontrado.'});
+  reply.header('cache-control','no-store');
+  const g=result.rows[0];return {name:g.name,companionNames:g.companion_names,companions:g.companions,isConfirmed:g.is_confirmed,wedding:req.weddingTitle};
+});
+app.post('/api/invitation/confirm', { config:{rateLimit:{max:10,timeWindow:'15 minutes'}} }, async(req,reply)=>{
+  if(!/^[a-f0-9]{64}$/.test(req.headers['x-invitation-token']))return reply.code(404).send({error:'Convite não encontrado.'});
+  const {companionNames}=req.body||{};
+  if(!Array.isArray(companionNames)||companionNames.length>4||companionNames.some(n=>!text(n,120)))return reply.code(400).send({error:'Informe os nomes dos acompanhantes (até quatro).'});
+  const schedule=await req.db.query("SELECT value->>'rsvpDeadline' AS deadline FROM site_settings WHERE key='event_schedule'");
+  const today=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Fortaleza',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+  if(schedule.rows[0]?.deadline&&today>schedule.rows[0].deadline)return reply.code(409).send({error:'O prazo para confirmar presença foi encerrado.'});
+  const result=await req.db.query('UPDATE guests SET companions=$1,companion_names=$2::jsonb,is_confirmed=true WHERE invite_token=$3 RETURNING id',[companionNames.length,JSON.stringify(companionNames.map(n=>n.trim())),req.headers['x-invitation-token']]);
+  if(!result.rowCount)return reply.code(404).send({error:'Convite não encontrado.'});
+  return {ok:true};
+});
+app.post('/api/admin/invitations/:id/send', {preHandler:requireAdmin,bodyLimit:5*1024*1024+65536}, async(req,reply)=>{
+  const part=await req.file();
+  if(!part)return reply.code(400).send({error:'Selecione a imagem do convite.'});
+  const buffer=await part.toBuffer(),format=imageFormat(buffer), message=part.fields.message?.value;
+  if(!format||!text(message,800))return reply.code(400).send({error:'Informe uma mensagem de até 800 caracteres e uma imagem JPG, PNG ou WebP.'});
+  const result=await req.db.query('SELECT name,whatsapp,invite_token FROM guests WHERE id::text=$1',[req.params.id]);
+  if(!result.rowCount)return reply.code(404).send({error:'Convidado não encontrado.'});
+  const guest=result.rows[0],base=process.env.APP_URL||`${req.protocol}://${req.headers.host}`;
+  const link=`${base.replace(/\/$/,'')}/casamento/${req.weddingSlug}/confirmar#${guest.invite_token}`;
+  const caption=`${message.trim().replaceAll('{nome}',guest.name)}\n\nConfirme sua presença: ${link}`;
+  if(caption.length>1024)return reply.code(400).send({error:'A mensagem ficou longa demais após incluir o link.'});
+  try{await sendInvitation({whatsapp:guest.whatsapp,caption,image:buffer,mimeType:format.type});return {ok:true};}
+  catch(error){req.log.warn({err:error},'Falha ao enviar convite');return reply.code(502).send({error:'Não foi possível enviar o convite pelo WhatsApp. Verifique a conexão da EvolutionAPI.'});}
+});
+
 app.post('/api/rsvp', { config: { rateLimit: { max: 5, timeWindow: '15 minutes' } } }, async (req, reply) => {
   const { name, whatsapp, companions = 0 } = req.body || {};
   if (!text(name, 120) || !phone(whatsapp) || !Number.isInteger(companions) || companions < 0 || companions > 4) return reply.code(400).send({ error: 'Confira nome, WhatsApp e quantidade de acompanhantes.' });
@@ -444,7 +480,7 @@ app.post('/api/webhooks/asaas/:weddingId', { config:{rateLimit:{max:120,timeWind
 app.get('/api/admin/data', { preHandler: requireAdmin }, async (req) => {
   const [memories, guests, suppliers, gifts, settings] = await Promise.all([req.db.query('SELECT * FROM memories ORDER BY created_at DESC'), req.db.query('SELECT * FROM guests ORDER BY created_at DESC'), req.db.query('SELECT * FROM suppliers ORDER BY name'),req.db.query('SELECT * FROM gifts ORDER BY category,title'),req.db.query("SELECT key,value FROM site_settings WHERE key IN ('venue_ceremony','venue_reception','story_content','event_schedule','design_theme') ORDER BY key")]);
   const values=Object.fromEntries(settings.rows.map(r=>[r.key,r.value]));
-  return { wedding:{slug:req.weddingSlug,title:req.weddingTitle}, memories: memories.rows.map(r => ({ ...memoryOut(r), whatsapp:r.whatsapp, isVisible:r.is_visible })), guests: guests.rows.map(r => ({ ...guestOut(r), whatsapp:r.whatsapp, isVisible:r.is_visible, isConfirmed:r.is_confirmed })), suppliers: suppliers.rows.map(r => ({ id:r.id,name:r.name,role:r.role,contact:r.contact,cost:Number(r.cost),paidAmount:Number(r.paid_amount),status:r.status,isVisible:r.is_visible })), gifts:gifts.rows.map(giftOut), venues: ['venue_ceremony','venue_reception'].map(k=>values[k]).filter(Boolean), story:values.story_content||null, event:values.event_schedule||null, design:values.design_theme||null };
+  return { wedding:{slug:req.weddingSlug,title:req.weddingTitle}, memories: memories.rows.map(r => ({ ...memoryOut(r), whatsapp:r.whatsapp, isVisible:r.is_visible })), guests: guests.rows.map(r => ({ ...guestOut(r), whatsapp:r.whatsapp, isVisible:r.is_visible, isConfirmed:r.is_confirmed, companionNames:r.companion_names })), suppliers: suppliers.rows.map(r => ({ id:r.id,name:r.name,role:r.role,contact:r.contact,cost:Number(r.cost),paidAmount:Number(r.paid_amount),status:r.status,isVisible:r.is_visible })), gifts:gifts.rows.map(giftOut), venues: ['venue_ceremony','venue_reception'].map(k=>values[k]).filter(Boolean), story:values.story_content||null, event:values.event_schedule||null, design:values.design_theme||null };
 });
 app.patch('/api/admin/slug', { preHandler: requireAdmin }, async (req, reply) => {
   const { slug } = req.body || {};
@@ -610,12 +646,12 @@ app.delete('/api/admin/:kind/:id', { preHandler: requireAdmin }, async (req, rep
   return result.rowCount ? {ok:true} : reply.code(404).send({error:'Registro não encontrado.'});
 });
 app.post('/api/admin/guests', { preHandler: requireAdmin }, async (req,reply)=>{
-  const {name,whatsapp,isConfirmed=false}=req.body||{};
-  if(!text(name,120)||!phone(whatsapp)||typeof isConfirmed!=='boolean')return reply.code(400).send({error:'Informe nome, WhatsApp e status válidos.'});
+  const {name,whatsapp}=req.body||{};
+  if(!text(name,120)||!phone(whatsapp))return reply.code(400).send({error:'Informe nome e WhatsApp válidos.'});
   await req.db.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`rsvp:${req.weddingId}:${normalizeBrazilianPhone(whatsapp)}:${normalizeGuestName(name)}`]);
   const existing=await req.db.query('SELECT name,whatsapp FROM guests WHERE wedding_id=$1',[req.weddingId]);
   if(existing.rows.some(row=>normalizeBrazilianPhone(row.whatsapp)===normalizeBrazilianPhone(whatsapp)&&normalizeGuestName(row.name)===normalizeGuestName(name)))return reply.code(409).send({error:'Este convidado já está cadastrado.'});
-  const result=await req.db.query('INSERT INTO guests(name,whatsapp,is_confirmed,wedding_id) VALUES($1,$2,$3,$4) RETURNING id',[name.trim(),whatsapp.trim(),isConfirmed,req.weddingId]);
+  const result=await req.db.query('INSERT INTO guests(name,whatsapp,is_confirmed,wedding_id) VALUES($1,$2,$3,$4) RETURNING id',[name.trim(),whatsapp.trim(),false,req.weddingId]);
   return reply.code(201).send({id:result.rows[0].id});
 });
 app.post('/api/admin/photos', {preHandler:requireAdmin,bodyLimit:5*1024*1024+64*1024}, async(req,reply)=>{

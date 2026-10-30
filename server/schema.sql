@@ -33,6 +33,9 @@ CREATE TABLE IF NOT EXISTS guests (
 );
 ALTER TABLE guests ADD COLUMN IF NOT EXISTS is_confirmed boolean NOT NULL DEFAULT true;
 ALTER TABLE guests ALTER COLUMN is_confirmed SET DEFAULT false;
+ALTER TABLE guests ADD COLUMN IF NOT EXISTS invite_token text NOT NULL DEFAULT (replace(gen_random_uuid()::text, '-', '') || replace(gen_random_uuid()::text, '-', ''));
+CREATE UNIQUE INDEX IF NOT EXISTS guests_invite_token_idx ON guests(invite_token);
+ALTER TABLE guests ADD COLUMN IF NOT EXISTS companion_names jsonb NOT NULL DEFAULT '[]'::jsonb;
 CREATE TABLE IF NOT EXISTS mirror_photos (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(), wedding_id uuid NOT NULL REFERENCES weddings(id) ON DELETE CASCADE,
   image_key text NOT NULL, position integer NOT NULL DEFAULT 0, created_at timestamptz NOT NULL DEFAULT now()

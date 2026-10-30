@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { sendRsvpConfirmation } from '../server/evolution.js';
+import { sendRsvpConfirmation, sendInvitation } from '../server/evolution.js';
 
 test('sends the RSVP confirmation to a Brazilian number with country code', async () => {
   let request;
@@ -43,4 +43,20 @@ test('surfaces API failures so the RSVP handler can record a failed notification
     ),
     /HTTP 503/,
   );
+});
+
+
+test('sends an invitation image and its personalized caption to the media endpoint', async () => {
+  let request;
+  await sendInvitation({whatsapp:'(85) 98858-4800',caption:'Olá! Confirme: https://site.test/convite#token',image:Buffer.from('image'),mimeType:'image/png'},
+    {EVOLUTION_API_URL:'https://evolution.example/message/sendText/wedding',EVOLUTION_API_KEY:'key'},
+    async (url,options)=>{request={url,options};return {ok:true}});
+  assert.equal(request.url,'https://evolution.example/message/sendMedia/wedding');
+  assert.deepEqual(JSON.parse(request.options.body),{number:'5585988584800',mediatype:'image',mimetype:'image/png',caption:'Olá! Confirme: https://site.test/convite#token',media:Buffer.from('image').toString('base64')});
+});
+
+test('rejects an invalid media endpoint and reports failed delivery', async () => {
+  const invitation={whatsapp:'85988584800',caption:'Convite',image:Buffer.from('image'),mimeType:'image/png'};
+  await assert.rejects(sendInvitation(invitation,{EVOLUTION_API_URL:'https://evolution.example/send',EVOLUTION_API_KEY:'key'}),/sendText/);
+  await assert.rejects(sendInvitation(invitation,{EVOLUTION_API_URL:'https://evolution.example/message/sendText/wedding',EVOLUTION_API_KEY:'key'},async()=>({ok:false,status:503})),/HTTP 503/);
 });

@@ -19,3 +19,12 @@ export async function sendRsvpConfirmation({ name, whatsapp, companions }, env =
   if (!response.ok) throw new Error(`EvolutionAPI respondeu HTTP ${response.status}.`);
   return true;
 }
+
+export async function sendInvitation({ whatsapp, caption, image, mimeType }, env = process.env, fetchImpl = fetch) {
+  if (!env.EVOLUTION_API_URL || !env.EVOLUTION_API_KEY) throw new Error('EvolutionAPI não configurada.');
+  const url = env.EVOLUTION_API_URL.replace(/\/message\/sendText\//, '/message/sendMedia/');
+  if (url === env.EVOLUTION_API_URL) throw new Error('Configure EVOLUTION_API_URL com o endpoint /message/sendText/ da instância.');
+  const response = await fetchImpl(url, { method:'POST', headers:{'content-type':'application/json', apikey:env.EVOLUTION_API_KEY}, body:JSON.stringify({ number:toBrazilianWhatsAppNumber(whatsapp), mediatype:'image', mimetype:mimeType, caption, media:image.toString('base64') }), signal:AbortSignal.timeout(15000) });
+  if (!response.ok) throw new Error(`EvolutionAPI respondeu HTTP ${response.status}.`);
+  return true;
+}
