@@ -90,6 +90,7 @@ CREATE TABLE IF NOT EXISTS gift_payments (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 ALTER TABLE gift_payments ADD COLUMN IF NOT EXISTS gift_title varchar(180) NOT NULL DEFAULT '';
+ALTER TABLE gift_payments ADD COLUMN IF NOT EXISTS environment varchar(12) CHECK (environment IN ('sandbox','production'));
 ALTER TABLE gift_payments DROP CONSTRAINT IF EXISTS gift_payments_status_check;
 ALTER TABLE gift_payments ADD CONSTRAINT gift_payments_status_check CHECK (status IN ('CREATING','PENDING','PAID','PAID_DUPLICATE','EXPIRED','CANCELED','FAILED','REFUND_PENDING','PARTIAL_REFUND','REFUNDED','CHARGEBACK'));
 CREATE UNIQUE INDEX IF NOT EXISTS gift_payments_checkout_tenant_idx ON gift_payments(wedding_id,checkout_id) WHERE checkout_id IS NOT NULL;

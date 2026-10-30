@@ -376,14 +376,23 @@ app.post('/api/admin/login', { config: { rateLimit: { max: 8, timeWindow: '15 mi
   return { ok: true, wedding:{slug:req.weddingSlug,title:req.weddingTitle} };
 });
 app.post('/api/admin/logout', { preHandler: requireAdmin }, async (req, reply) => { reply.clearCookie('admin_session', { path: '/' }); return { ok: true }; });
+async function paymentHistory(req, environment) {
+  const result=await req.db.query(`SELECT id,sender_name,gift_title,amount,status,checkout_url,created_at,updated_at FROM gift_payments
+    WHERE wedding_id=$1 AND COALESCE(environment,CASE WHEN checkout_url ~* '^https://sandbox\\.asaas\\.com([/:?#]|$)' THEN 'sandbox' WHEN checkout_url ~* '^https://asaas\\.com([/:?#]|$)' THEN 'production' END)=$2
+    ORDER BY created_at DESC LIMIT 100`,[req.weddingId,environment]);
+  return result.rows.map(p=>({id:p.id,giftTitle:p.gift_title,senderName:p.sender_name,amount:Number(p.amount),status:p.status,checkoutUrl:p.checkout_url,createdAt:p.created_at,updatedAt:p.updated_at}));
+}
+app.get('/api/admin/payments/history', {preHandler:requireAdmin}, async(req,reply)=>{
+  const environment=req.query?.environment;
+  if(!['sandbox','production'].includes(environment))return reply.code(400).send({error:'Informe um ambiente válido.'});
+  return {environment,payments:await paymentHistory(req,environment)};
+});
 app.get('/api/admin/payments', { preHandler: requireAdmin }, async req=>{
-  const [integration,payments]=await Promise.all([
-    req.db.query('SELECT environment,is_active,last_tested_at FROM payment_integrations WHERE wedding_id=$1',[req.weddingId]),
-    req.db.query('SELECT id,gift_id,sender_name,gift_title,amount,status,checkout_url,created_at,updated_at FROM gift_payments WHERE wedding_id=$1 ORDER BY created_at DESC LIMIT 100',[req.weddingId])
-  ]);
-  const configured=integration.rowCount>0, row=integration.rows[0];
+  const integration=await req.db.query('SELECT environment,is_active,last_tested_at FROM payment_integrations WHERE wedding_id=$1',[req.weddingId]);
+  const configured=integration.rowCount>0, row=integration.rows[0],environment=row?.environment||'sandbox';
+  const [payments,unknown]=await Promise.all([paymentHistory(req,environment),req.db.query(`SELECT count(*)::int AS count FROM gift_payments WHERE wedding_id=$1 AND environment IS NULL AND (checkout_url IS NULL OR checkout_url !~* '^https://(sandbox\\.)?asaas\\.com([/:?#]|$)')`,[req.weddingId])]);
   const appUrl=paymentsWebhookBase(req);
-  return {configured,environment:row?.environment||'sandbox',isActive:Boolean(row?.is_active),lastTestedAt:row?.last_tested_at||null,webhookUrl:`${appUrl.replace(/\/$/,'')}/api/webhooks/asaas/${req.weddingId}`,payments:payments.rows.map(p=>({id:p.id,giftTitle:p.gift_title,senderName:p.sender_name,amount:Number(p.amount),status:p.status,checkoutUrl:p.checkout_url,createdAt:p.created_at,updatedAt:p.updated_at}))};
+  return {configured,environment,isActive:Boolean(row?.is_active),lastTestedAt:row?.last_tested_at||null,webhookUrl:`${appUrl.replace(/\/$/,'')}/api/webhooks/asaas/${req.weddingId}`,payments,unknownEnvironmentCount:unknown.rows[0].count};
 });
 app.put('/api/admin/payments/config', { preHandler: requireAdmin }, async(req,reply)=>{
   const {environment='sandbox',apiKey,rotateWebhookToken=false}=req.body||{};
@@ -438,8 +447,8 @@ app.post('/api/payments/checkout', { config:{rateLimit:{max:5,timeWindow:'15 min
   const registeredGuests=await req.db.query('SELECT id,name,whatsapp FROM guests WHERE wedding_id=$1 AND is_confirmed=true',[req.weddingId]);
   const guest=registeredGuests.rows.find(row=>normalizeBrazilianPhone(row.whatsapp)===normalizedPhone&&normalizeGuestName(row.name)===normalizeGuestName(senderName));
   if(!guest)return reply.code(403).send({error:'Não encontramos uma confirmação com esse WhatsApp e nome. Use os mesmos dados informados no RSVP; acentos, espaços e pontuação no nome não precisam ser idênticos.'});
-  const inserted=await req.db.query(`INSERT INTO gift_payments(wedding_id,gift_id,gift_title,guest_id,sender_name,whatsapp,dedication,amount,status,expires_at)
-    VALUES($1,$2,$3,$4,$5,$6,$7,$8,'CREATING',now()+interval '65 minutes') RETURNING id`,[req.weddingId,giftId,gift.title,guest.id,senderName.trim(),whatsapp.trim(),dedication.trim(),gift.price]);
+  const inserted=await req.db.query(`INSERT INTO gift_payments(wedding_id,gift_id,gift_title,guest_id,sender_name,whatsapp,dedication,amount,status,expires_at,environment)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,'CREATING',now()+interval '65 minutes',$9) RETURNING id`,[req.weddingId,giftId,gift.title,guest.id,senderName.trim(),whatsapp.trim(),dedication.trim(),gift.price,config.rows[0].environment]);
   const paymentId=inserted.rows[0].id;
   const baseUrl=process.env.NODE_ENV==='production'&&process.env.APP_URL?process.env.APP_URL.replace(/\/$/,''):`${req.protocol}://${req.headers.host}`;
   const callback=`${baseUrl}/casamento/${encodeURIComponent(req.weddingSlug)}?pagamento=`;
