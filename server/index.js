@@ -443,6 +443,13 @@ app.patch('/api/admin/payments/activation', { preHandler: requireAdmin }, async(
   await req.db.query('UPDATE payment_integrations SET is_active=$2,updated_at=now() WHERE wedding_id=$1',[req.weddingId,enabled]);
   return {ok:true,isActive:enabled};
 });
+app.post('/api/payments/find-guest', {config:{rateLimit:{max:20,timeWindow:'2 minutes'}}}, async(req,reply)=>{
+  const {whatsapp}=req.body||{},digits=normalizeBrazilianPhone(whatsapp);
+  if(!phone(whatsapp)||!/^\d{10,11}$/.test(digits))return reply.code(400).send({error:'Informe um número de celular completo com DDD.'});
+  const result=await req.db.query('SELECT name,whatsapp FROM guests WHERE wedding_id=$1 AND is_confirmed=true',[req.weddingId]);
+  const names=[...new Set(result.rows.filter(row=>normalizeBrazilianPhone(row.whatsapp)===digits).map(row=>row.name))];
+  return {names};
+});
 app.post('/api/payments/checkout', { config:{rateLimit:{max:5,timeWindow:'2 minutes'}} }, async(req,reply)=>{
   const {giftId,senderName,whatsapp,email='',dedication=''}=req.body||{};
   if(!text(giftId,40)||!text(senderName,120)||!phone(whatsapp)||typeof email!=='string'||email.length>254||(email&&!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))||typeof dedication!=='string'||dedication.length>1000)return reply.code(400).send({error:'Confira o presente, nome, WhatsApp e e-mail informado.'});
