@@ -261,12 +261,13 @@ app.post('/api/memories/dedication', { config: { rateLimit: { max: 5, timeWindow
   return reply.code(201).send({ memory: memoryOut(result.rows[0]) });
 });
 app.post('/api/memories/guest-dedication', { config:{rateLimit:{max:5,timeWindow:'2 minutes'}} }, async(req,reply)=>{
-  const {name,whatsapp,message}=req.body||{};
-  if(!text(name,120)||!phone(whatsapp)||!text(message,1000))return reply.code(400).send({error:'Informe nome, WhatsApp e uma dedicatória de até 1.000 caracteres.'});
-  const guests=await req.db.query('SELECT name,whatsapp FROM guests WHERE wedding_id=$1 AND is_confirmed=true',[req.weddingId]);
-  const guest=guests.rows.find(row=>normalizeGuestName(row.name)===normalizeGuestName(name)&&normalizeBrazilianPhone(row.whatsapp)===normalizeBrazilianPhone(whatsapp));
-  if(!guest)return reply.code(404).send({error:'Não encontramos uma confirmação com esse nome e WhatsApp. Use os dados do convite confirmado.'});
-  await req.db.query("INSERT INTO memories(sender_name,whatsapp,gift_title,gift_amount,message,wedding_id) VALUES($1,$2,'Dedicatória',0,$3,$4)",[guest.name,whatsapp.trim(),message.trim(),req.weddingId]);
+  const {name,message}=req.body||{};
+  if(!text(name,120)||!text(message,1000))return reply.code(400).send({error:'Informe o nome e uma dedicatória de até 1.000 caracteres.'});
+  const guests=await req.db.query('SELECT name FROM guests WHERE wedding_id=$1 AND is_confirmed=true',[req.weddingId]);
+  const matches=guests.rows.filter(row=>normalizeGuestName(row.name)===normalizeGuestName(name));
+  if(!matches.length)return reply.code(404).send({error:'Não encontramos uma confirmação com esse nome. Use o nome do convite confirmado.'});
+  if(matches.length>1)return reply.code(409).send({error:'Há mais de um convidado com esse nome. Peça aos noivos para diferenciar os nomes dos convites.'});
+  await req.db.query("INSERT INTO memories(sender_name,whatsapp,gift_title,gift_amount,message,wedding_id) VALUES($1,'','Dedicatória',0,$2,$3)",[matches[0].name,message.trim(),req.weddingId]);
   return reply.code(201).send({ok:true});
 });
 app.post('/api/memories', { config: { rateLimit: { max: 5, timeWindow: '2 minutes' } } }, async (req, reply) => {
