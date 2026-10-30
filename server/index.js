@@ -14,6 +14,7 @@ import { promisify } from 'node:util';
 import { INITIAL_GIFTS, INITIAL_MEMORIES, INITIAL_GUESTS, INITIAL_SUPPLIERS } from './seed-data.js';
 import { sendRsvpConfirmation, sendInvitation } from './evolution.js';
 import { normalizeBrazilianPhone, normalizeGuestName } from './guest-match.js';
+import { validRegistrationPassword } from './password-policy.js';
 import { asaasCheckoutUrl, asaasRequest, checkoutItem, decryptSecret, encryptSecret, hashWebhookToken, secureTokenMatches } from './asaas.js';
 import { isStorageConfigured, ensureStorage, putImage, getImage, deleteImage, closeStorage } from './storage.js';
 
@@ -300,9 +301,10 @@ app.post('/api/admin/memories', { preHandler: requireAdmin }, async (req,reply)=
 });
 app.post('/api/admin/register', { config: { rateLimit: { max: 3, timeWindow: '2 minutes' } } }, async (req, reply) => {
   const { title, slug, username, email, password } = req.body || {};
-  if (!text(title, 180) || typeof slug !== 'string' || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug) || slug.length > 80 || !text(username, 40) || !/^[a-zA-Z0-9._-]{3,40}$/.test(username.trim()) || typeof email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim()) || email.length > 254 || typeof password !== 'string' || password.length < 12 || password.length > 200) {
-    return reply.code(400).send({ error: 'Informe o nome do casamento, slug (letras minúsculas e hífens), usuário, e-mail e senha com pelo menos 12 caracteres.' });
+  if (!text(title, 180) || typeof slug !== 'string' || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug) || slug.length > 80 || !text(username, 40) || !/^[a-zA-Z0-9._-]{3,40}$/.test(username.trim()) || typeof email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim()) || email.length > 254) {
+    return reply.code(400).send({ error: 'Informe o nome do casamento, slug (letras minúsculas e hífens), usuário e e-mail válidos.' });
   }
+  if(!validRegistrationPassword(password))return reply.code(400).send({error:'A senha deve ter de 12 a 200 caracteres, incluindo letra, número, letra maiúscula e caractere especial.'});
   const hashed = await passwordHash(password), db = await pool.connect();
   try {
     await db.query('BEGIN');
